@@ -1,0 +1,82 @@
+/.vs/
+/packages/
+/.vscode/
+.DS_Store
+*.dSYM
+/*.vcxproj.user
+*.aps
+/obj/
+/bin/
+/assets/overworld/*.yaml
+/assets/dungeon/*.yaml
+/assets/img/
+/assets/old/
+/zelda3.sfc
+/zelda3.smc
+/saves/*.sav
+/saves/sram.dat
+/saves/sram.bak
+/zelda3
+__pycache__
+/src/*.o
+/*.exe
+/*.out
+/snes/*.o
+/msu/
+/tmp/
+/zelda3_assets.dat
+/zelda3_assets.tmp
+/SDL2.dll
+/zelda3.*.ini
+
+# Release hygiene: nothing runtime, private or copyrighted ships in a package.
+/saves/*.thumb
+/logs/
+*.nro
+*.elf
+*.nacp
+*.lst
+ra_token
+/zelda3.wiki
+/sprites-gfx
+/glsl-shaders
+/token.txt
+/src/platform/switch/bin/
+/src/platform/switch/*.elf
+/src/platform/switch/*.nacp
+/src/platform/switch/*.nro
+
+# ---- ALEKS NX ------------------------------------------------------------
+# Nothing generated from, or belonging to, a user's own ROM or account may
+# ever be committed.  Everything below is produced at runtime on the console.
+
+# RetroAchievements credential.  This is the user's session token.
+ra_token
+ra_badges/
+
+# Translated ROMs the user supplies, and the language data extracted from
+# them.  Both are derived from copyrighted material and are strictly local.
+languages/
+*.z3lang
+
+# Runtime state and diagnostics (may contain paths and play history).
+logs/
+startup.log
+*.z3lang.tmp
+# NOT ignored: zelda3.ini (root) and src/platform/switch/zelda3.ini are
+# documented default templates that ship with the project -- upstream tracks
+# the root one too, and only ignores user variants via /zelda3.*.ini above.
+# The generated runtime config lives on the SD card, never in the repository.
+/zelda3.ini.bak
+/zelda3.ini.tmp
+
+# Save states and their thumbnails, alongside the SRAM rules already above.
+/saves/*.thumb
+/saves/*.state
+
+# Switch build outputs (the Makefile writes beside the sources).
+src/platform/switch/*.nro
+src/platform/switch/*.elf
+src/platform/switch/*.nacp
+src/platform/switch/*.lst
+src/platform/switch/bin/
