@@ -299,7 +299,8 @@ sdmc:/switch/Zelda3/
 └── logs/                 diagnostics
 ```
 
-Everything except the `.nro` and your ROM is created automatically.
+Runtime directories and generated files are created automatically as needed.
+Optional translation ROMs and MSU-1 content are supplied by the user.
 
 ---
 
