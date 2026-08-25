@@ -213,10 +213,21 @@ with its badge.
 Translated dialogue is extracted **locally, from a translation ROM you
 supply**. No translated content is distributed with this project.
 
-Place a compatible translated ROM in `languages/` and launch the game. Every
-`.sfc`/`.smc` there is examined; a compatible one has its dialogue,
-dictionary, font and character widths extracted into a small local pack, and
-appears in **Settings → System → Language**.
+Place a compatible translated ROM in `languages/` — **not** in the root, which
+is where the USA ROM lives — and launch the game. Every `.sfc`/`.smc` in
+`languages/` is examined; a compatible one has its dialogue, dictionary, font
+and character widths extracted into a small local pack, and appears in
+**Settings → System → Language**.
+
+A translation ROM **does not replace the USA ROM**. It only supplies text; the
+game itself is still built from the USA ROM in the root, which must stay
+there. Putting a translation in the root instead will fail asset extraction —
+see [Installation](#installation).
+
+Any filename works. Short codes read best, because an unrecognised ROM is
+named after its file: `fr.sfc` shows up as `FR`, while
+`zelda-traducida-v2.smc` shows up as `ZELDA-TRADUCIDA-V2`. ROMs the extractor
+recognises name themselves regardless of filename.
 
 **Compatibility is about ROM layout, not spoken language.** This has been
 tested on real Switch hardware with **one** compatible Spanish translation
@@ -277,23 +288,47 @@ You need a legally obtained **USA** copy of A Link to the Past. No ROM is
 included here and none will be provided.
 
 1. Copy the `.nro` to `sdmc:/switch/Zelda3/`.
-2. Put your ROM in the same folder (`.sfc` or `.smc`).
+2. Put your **USA ROM** in that same folder (`.sfc` or `.smc`).
 3. Launch it.
 
 On first run the built-in extractor finds your ROM, validates it, and
 generates `zelda3_assets.dat` locally — on the console, with no Python or
 other tooling required. A 512-byte copier header is handled where supported.
 
+**Keep the ROM there.** If `zelda3_assets.dat` is ever deleted the extractor
+needs the ROM again to rebuild it. The patch shipped inside the `.nro` is only
+a set of instructions — a few kilobytes — and contains no game data of its
+own.
+
+> ### Two ROMs, two different jobs
+>
+> If you also use a translation, note that the two ROMs are **not**
+> interchangeable and do not go in the same place:
+>
+> | | Where | What it does |
+> |---|---|---|
+> | **USA ROM** | `Zelda3/` (the root) | Builds the game. **Required.** |
+> | **Translation ROM** | `Zelda3/languages/` | Supplies dialogue only. Optional. |
+>
+> A translated ROM in the root will be rejected with
+> **`FAILED: Unsupported or wrong ROM`**. That is correct behaviour, not a
+> bug: the asset patch is computed byte-for-byte against the original USA ROM,
+> and a translation has different bytes. Move it to `languages/` and put the
+> USA ROM back in the root.
+>
+> Only the root folder is scanned for the base ROM, so anything inside
+> `languages/` can never interfere with extraction.
+
 ### Folder layout
 
 ```
 sdmc:/switch/Zelda3/
 ├── Zelda3-ALEKS-NX.nro
-├── zelda3.sfc            your ROM
-├── zelda3_assets.dat     generated on first run
+├── zelda3.sfc            your USA ROM  <- required, keep it here
+├── zelda3_assets.dat     generated on first run from the ROM above
 ├── zelda3.ini            generated; all settings live here
 ├── saves/                SRAM and save states
-├── languages/            optional translation ROMs and extracted packs
+├── languages/            optional translation ROMs (es.smc, ...) and their packs
 ├── msu/                  optional MSU-1 audio
 ├── screenshots/
 └── logs/                 diagnostics
