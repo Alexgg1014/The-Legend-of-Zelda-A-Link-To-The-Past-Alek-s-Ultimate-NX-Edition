@@ -580,6 +580,10 @@ void SecondScreenSDL_SetTab(int page);
 static int sw_thumb_want = -1;       /* a save waiting for its frame grab */
 static int sw_state_flash = -1;
 static uint32_t sw_state_flash_until;
+/* What the flashing slot says.  An empty slot that was asked to LOAD must not
+ * report DONE -- that read as "loaded" and was half of why an empty slot
+ * looked broken (public issue #1). */
+static const char *sw_state_flash_msg = "DONE";
 #endif
 static RectFS developer_row_r[2], developer_back_r;
 
@@ -1899,8 +1903,10 @@ static void sw_state_refresh(int slot) {
     SDL_DestroyTexture(sw_state_thumb[slot]);
     sw_state_thumb[slot] = NULL;
   }
+  /* No .sav means no slot, whatever a leftover .thumb from a removed or
+   * failed save still says on disk. */
   sw_state_path(path, sizeof(path), slot, "thumb");
-  f = fopen(path, "rb");
+  f = sw_state_stamp[slot] ? fopen(path, "rb") : NULL;
   if (f) {
     static uint32_t px[kSsThumbW * kSsThumbH];
     if (fread(px, 1, sizeof(px), f) == sizeof(px))
@@ -2052,7 +2058,7 @@ static const char *const kQolIniKey[12] = {
 };
 static const char *const kQolLabel[12] = {
   "ITEM SWITCH LR", "TURN WHILE DASHING", "MIRROR TO DARK WORLD",
-  "COLLECT WITH SWORD", "BREAK POTS WITH SWORD", "NO LOW HEALTH BEEP",
+  "COLLECT WITH SWORD", "BREAK POTS: LV2 SWORD", "NO LOW HEALTH BEEP",
   "SKIP INTRO", "MAX ITEMS IN YELLOW", "MORE ACTIVE BOMBS",
   "CARRY MORE RUPEES", "MISC BUG FIXES", "CANCEL BIRD TRAVEL",
 };
@@ -2097,6 +2103,10 @@ static int sw_build(int menu) {
     /* Aspect is the engine's, not the presentation's: this asks Zelda3 to
      * render 4:3 or true widescreen, it never stretches a finished frame. */
     ROW("ASPECT", AleksAspect_Label(SS_GetAspect()));
+    /* Presentation, not rendering: how the finished frame is SHAPED.  Sits
+     * next to ASPECT because the two together decide what the player sees,
+     * but they are independent -- see AleksLayout_FrameAspect. */
+    ROW("PIXEL ASPECT", g_config.aleks_square_pixels ? "SQUARE 1:1" : "TV 7:6");
     /* Esteban fixed camera.  Only meaningful while WIDE is on. */
     ROW("WIDE CAMERA", SS_GetWideEdgeMode() == 1 ? "FIXED" : "STANDARD");
     /* No COMPANION LAYOUT row.  TALL has no implementation behind it: the
@@ -2184,7 +2194,7 @@ static int sw_build(int menu) {
   case SW_STATES:
     for (int i = 0; i < SW_STATE_SLOTS; i++) {
       const char *v = sw_state_flash == i && SDL_GetTicks() < sw_state_flash_until ?
-        "DONE" : (sw_state_stamp[i] ? "SAVE   LOAD" : "EMPTY");
+        sw_state_flash_msg : (sw_state_stamp[i] ? "SAVE   LOAD" : "EMPTY");
       ROW(FMT("SLOT %d", i + 1), v);
     }
     break;
@@ -2483,18 +2493,29 @@ static void sw_activate(int menu, int row, int dir) {
       return;
     }
     case 2: {
+      /* No texture work and no engine reconfigure: the compositor recomputes
+       * the layout every present, so this lands on the next frame.  That is
+       * why it does not go anywhere near the aspect-change safepoint or the
+       * WIDE-return protections. */
+      bool square = !g_config.aleks_square_pixels;
+      g_config.aleks_square_pixels = square;
+      update_ini("[General]", "AleksSquarePixels", square ? "true" : "false");
+      StartupLog("PIXEL ASPECT: %s", square ? "SQUARE 1:1" : "TV 7:6");
+      return;
+    }
+    case 3: {
       int fixed = SS_GetWideEdgeMode() == 1 ? 0 : 1;
       SS_SetWideEdgeMode(fixed);
       update_ini("[General]", "AleksWideCamera", fixed ? "Fixed" : "Standard");
       return;
     }
-    case 3:
+    case 4:
       g_config.aleks_screen_order = !g_config.aleks_screen_order;
       update_ini("[General]", "AleksScreenOrder",
                  g_config.aleks_screen_order ? "CompanionFirst" : "GameFirst");
       return;
-    case 4: sw_push(SW_DUAL); return;
-    case 5: sw_push(SW_FLIP); return;
+    case 5: sw_push(SW_DUAL); return;
+    case 6: sw_push(SW_FLIP); return;
     }
     return;
 
@@ -2685,8 +2706,9 @@ static void sw_activate(int menu, int row, int dir) {
   }
 }
 
-static void sw_state_flash_now(int slot) {
+static void sw_state_flash_now(int slot, const char *msg) {
   sw_state_flash = slot;
+  sw_state_flash_msg = msg;
   sw_state_flash_until = SDL_GetTicks() + 900;
 }
 
@@ -2705,9 +2727,9 @@ static void sw_state_arm_save(int slot, bool quick) {
  * load cannot.  An empty slot does nothing but say so. */
 static void sw_state_load(int slot) {
   if (slot < 0 || slot >= SW_STATE_SLOTS) return;
-  if (!sw_state_stamp[slot]) { sw_state_flash_now(slot); return; }
+  if (!sw_state_stamp[slot]) { sw_state_flash_now(slot, "EMPTY"); return; }
   SS_RequestLoadState(sw_backend_slot(slot));
-  sw_state_flash_now(slot);
+  sw_state_flash_now(slot, "LOADED");
 }
 
 static void sw_confirm_clear(void) {
@@ -3976,19 +3998,32 @@ void SecondScreenSDL_TapLocal(int x, int y, int long_press) {
 /* ONE authoritative page order, shared by the tab bar, the controller cycle
  * and the NORMAL overlay.  GUIDE is skipped when the Story Guide is off, so
  * turning it off removes the page from the cycle rather than leaving a dead
- * stop in it. */
+ * stop in it.
+ *
+ * THIS IS THE ORDER draw_tab_bar() PAINTS, LEFT TO RIGHT.  It used to start
+ * at MAP and put GEAR third, so cycling with the shoulder buttons walked the
+ * tabs in an order the player could not see anywhere on screen (community
+ * report, v1.0.0).  The visible order is public-facing UX and is the one that
+ * wins; the cycle follows the UI, never the other way round.
+ *
+ * SETTINGS is deliberately absent: it is the cog, not one of the five content
+ * tabs.  It is reached by the global ZL+R3 shortcut and by tapping the cog.
+ */
 #define SW_PAGE_CYCLE_N 5
 static const int kPageCycle[SW_PAGE_CYCLE_N] = {
-  TAB_MAP, TAB_ITEMS, TAB_GEAR, TAB_SAVE, TAB_GUIDE,
+  TAB_GEAR, TAB_MAP, TAB_ITEMS, TAB_SAVE, TAB_GUIDE,
 };
 
-void SecondScreenSDL_CycleTab(void) {
+/* dir is +1 for the next tab and -1 for the previous one, so a controller can
+ * walk the bar both ways. */
+void SecondScreenSDL_CycleTabDir(int dir) {
   if (tab == TAB_SETTINGS) return;
+  if (dir >= 0) dir = 1; else dir = -1;
   int at = 0;
   for (int i = 0; i < SW_PAGE_CYCLE_N; i++)
     if (kPageCycle[i] == tab) { at = i; break; }
   for (int step = 1; step <= SW_PAGE_CYCLE_N; step++) {
-    int next = kPageCycle[(at + step) % SW_PAGE_CYCLE_N];
+    int next = kPageCycle[((at + dir * step) % SW_PAGE_CYCLE_N + SW_PAGE_CYCLE_N) % SW_PAGE_CYCLE_N];
     if (next == TAB_GUIDE && !StoryGuide_IsEnabled()) continue;
     tab = next;
     break;
@@ -4000,6 +4035,16 @@ void SecondScreenSDL_CycleTab(void) {
                                           tab == TAB_GEAR ? 3 :
                                           tab == TAB_GUIDE ? 4 :
                                           tab == TAB_SAVE ? 5 : 0);
+}
+
+void SecondScreenSDL_CycleTab(void) { SecondScreenSDL_CycleTabDir(1); }
+
+/* ZL+R3 from anywhere.  Unlike ToggleSettings this never walks away from
+ * SETTINGS, so the shortcut that OPENS the page cannot also close it on the
+ * press that first brought the companion on screen. */
+void SecondScreenSDL_OpenSettings(void) {
+  tab = TAB_SETTINGS;
+  leave_settings_submenu();
 }
 
 void SecondScreenSDL_SetTab(int page) {
@@ -4050,7 +4095,7 @@ bool SecondScreenSDL_ConfirmCommit(void) {
     } else {
       SS_RequestSaveState(sw_backend_slot(sw_confirm_slot));
       sw_thumb_want = sw_confirm_slot;
-      sw_state_flash_now(sw_confirm_slot);
+      sw_state_flash_now(sw_confirm_slot, "SAVED");
     }
   }
   if (sw_confirm_restore_tab >= 0) {

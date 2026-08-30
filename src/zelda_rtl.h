@@ -82,7 +82,7 @@ enum {
   kSaveLoad_Replay = 2,
 };
 
-void SaveLoadSlot(int cmd, int which);
+bool SaveLoadSlot(int cmd, int which);
 void ZeldaClearAutosave(void);
 void ZeldaWriteSram();
 void ZeldaReadSram();

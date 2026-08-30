@@ -692,6 +692,8 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
     } else if (StringEqualsNoCase(key, "AleksCompanionLayout")) {
       g_config.aleks_companion_layout = StringEqualsNoCase(value, "Tall") ? 1 : 0;
       return true;
+    } else if (StringEqualsNoCase(key, "AleksSquarePixels")) {
+      return ParseBool(value, &g_config.aleks_square_pixels);
     } else if (StringEqualsNoCase(key, "AleksScreenOrder")) {
       g_config.aleks_screen_order = StringEqualsNoCase(value, "CompanionFirst") ? 1 : 0;
       return true;
@@ -822,6 +824,7 @@ void Config_SetDefaults(void) {
   g_config.aleks_hud_mode = 0;             // AUTO
   g_config.aleks_companion_layout = 0;     // CLASSIC
   g_config.aleks_screen_order = 0;         // game first
+  g_config.aleks_square_pixels = false;    // CRT 7:6, the shipped look
   g_config.aleks_companion_hud = true;
   g_config.aleks_companion_page = 0;       // MAP
   g_config.aleks_touch_ui = true;
@@ -866,6 +869,7 @@ bool Config_WriteDefaultIni(const char *path) {
     "AleksWideCamera = %s\n"
     "AleksHudMode = %s\n"
     "AleksCompanionLayout = %s\n"
+    "AleksSquarePixels = %s\n"
     "AleksScreenOrder = %s\n"
     "AleksCompanionHud = %s\n"
     "AleksCompanionPage = Map\n"
@@ -887,6 +891,7 @@ bool Config_WriteDefaultIni(const char *path) {
     g_config.aleks_wide_camera ? "Fixed" : "Standard",
     g_config.aleks_hud_mode == 1 ? "On" : g_config.aleks_hud_mode == 2 ? "Off" : "Auto",
     g_config.aleks_companion_layout ? "Tall" : "Classic",
+    g_config.aleks_square_pixels ? "true" : "false",
     g_config.aleks_screen_order ? "CompanionFirst" : "GameFirst",
     g_config.aleks_companion_hud ? "true" : "false",
     g_config.aleks_touch_ui ? "true" : "false",

@@ -62,12 +62,38 @@ static int pct_or(int v, int fallback) {
   return v ? v : fallback;
 }
 
+/*
+ * PIXEL ASPECT (public issue #3, "option for square pixels").
+ *
+ * The SNES renders 256x224 and the CRT stretched it to 4:3, so a source pixel
+ * is 7:6, not square.  That 7:6 is the ONLY place this build encodes the
+ * stretch -- there is no SDL_RenderSetLogicalSize and no OpenGL viewport fixup
+ * here (the crash journal's "logical size is unused in this build" is
+ * literal), so square pixels is PAR 1:1 and nothing else changes: same
+ * rendered source, same texture, same engine, no reconfigure.
+ *
+ * ORTHOGONAL to kAleksAspect_*, which decides how much WORLD is rendered.
+ * Note what the two PARs do to the widescreen solves:
+ *
+ *   PAR 7:6  ->  a displayed 16:9 needs 342x224   (kAleksAspect_True169)
+ *   PAR 1:1  ->  a displayed 16:9 needs 398x224   (kAleksAspect_Wide, whose
+ *                extra_side is (224*16/9-256)/2 = 71 -- the same solve for a
+ *                square pixel).  The legacy WIDE mode always WAS the
+ *                square-pixel 16:9; it was simply never shown with that PAR.
+ *
+ * Every layout mode goes through this one function, so NORMAL, DUAL, FLIP and
+ * the touch transform all follow from it with no per-mode code.
+ */
 void AleksLayout_FrameAspect(int src_w, int src_h, int *num, int *den) {
+  int par_num = ALEKS_PAR_NUM, par_den = ALEKS_PAR_DEN;
   if (src_w <= 0) src_w = 256;
   if (src_h <= 0) src_h = 224;
-  /* width * PAR : height.  At 256x224 this is 256*7 : 224*6 = 4:3. */
-  *num = src_w * ALEKS_PAR_NUM;
-  *den = src_h * ALEKS_PAR_DEN;
+  if (g_config.aleks_square_pixels)
+    par_num = par_den = 1;
+  /* width * PAR : height.  At 256x224 that is 256*7 : 224*6 = 4:3 on a CRT
+   * pixel, and 256:224 = 8:7 on a square one. */
+  *num = src_w * par_num;
+  *den = src_h * par_den;
 }
 
 /*

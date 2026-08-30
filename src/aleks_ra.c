@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <dirent.h>
 #include <SDL.h>
 
 #include "config.h"
@@ -58,7 +59,9 @@ extern int Port_Swkbd_Get(const char *header, int password,
                           char *out, size_t out_cap);
 
 #define RA_TOKEN_PATH "ra_token"
-#define ZELDA_ROM_PATH "zelda3.sfc"
+/* The name the PC build insists on.  On Switch the ROM keeps whatever name the
+ * player's dump has -- see rom_open() -- so this is only a fast path. */
+#define ZELDA_ROM_PREFERRED "zelda3.sfc"
 
 static rc_client_t *sClient;
 static bool sEnabled;
@@ -197,16 +200,66 @@ static void event_handler(const rc_client_event_t *event, rc_client_t *client) {
  * bytes ever leave the card.  rcheevos' SNES hasher handles the 512-byte
  * copier header itself, so both headered and headerless dumps identify.
  */
+/*
+ * FIND THE ROM (public issue #4, "RetroAchievements not working").
+ *
+ * This used to be a bare fopen("zelda3.sfc").  On Switch that name is never
+ * required: SwitchFirstRun_EnsureAssets() scans for ANY *.sfc / *.smc, lets
+ * the player pick one, extracts zelda3_assets.dat from it and leaves the file
+ * under its own name -- "Zelda3.smc", "alttp.sfc", the full No-Intro title,
+ * whatever the player's dump is called.  Every later boot loads the cached
+ * .dat and never touches the ROM again.
+ *
+ * So for anyone whose ROM is not literally named zelda3.sfc, rom_hash()
+ * returned false and load_game() gave up WITHOUT LOGGING A SINGLE LINE.  The
+ * reporter's startup.log shows exactly that: "RA: logged in (token stored)"
+ * and then nothing at all -- login fine, session never started, no rich
+ * presence, no unlocks.
+ *
+ * Resolution order: the preferred name first (unchanged behaviour, no scan
+ * cost for anyone already set up that way), then the first SNES image in the
+ * runtime root.  languages/ is a subdirectory and is deliberately not walked,
+ * so a translation ROM can never be hashed in place of the base game.
+ */
+static FILE *rom_open(char *name_out, size_t name_size) {
+  DIR *dir;
+  struct dirent *ent;
+  FILE *f = fopen(ZELDA_ROM_PREFERRED, "rb");
+
+  if (f) {
+    snprintf(name_out, name_size, "%s", ZELDA_ROM_PREFERRED);
+    return f;
+  }
+  dir = opendir(".");
+  if (!dir) return NULL;
+  while ((ent = readdir(dir)) != NULL) {
+    const char *dot = strrchr(ent->d_name, '.');
+    if (!dot) continue;
+    if (SDL_strcasecmp(dot, ".sfc") != 0 && SDL_strcasecmp(dot, ".smc") != 0)
+      continue;
+    f = fopen(ent->d_name, "rb");
+    if (f) {
+      snprintf(name_out, name_size, "%s", ent->d_name);
+      break;
+    }
+  }
+  closedir(dir);
+  return f;
+}
+
 static bool rom_hash(void) {
-  FILE *f = fopen(ZELDA_ROM_PATH, "rb");
+  char rom_name[256] = {0};
+  FILE *f = rom_open(rom_name, sizeof rom_name);
   long size;
   unsigned char *rom;
   bool ok;
 
   if (!f) {
     snprintf(sGameLine, sizeof sGameLine, "NO ROM TO IDENTIFY");
+    StartupLog("RA: no .sfc/.smc in the runtime root; cannot identify the game");
     return false;
   }
+  StartupLog("RA: identifying from %s", rom_name);
   fseek(f, 0, SEEK_END);
   size = ftell(f);
   fseek(f, 0, SEEK_SET);
@@ -214,6 +267,7 @@ static bool rom_hash(void) {
   if (size <= 0 || size > 8 * 1024 * 1024) {
     fclose(f);
     snprintf(sGameLine, sizeof sGameLine, "ROM SIZE UNSUPPORTED");
+    StartupLog("RA: %s is %ld bytes, not a usable SNES image", rom_name, size);
     return false;
   }
   rom = (unsigned char *)malloc((size_t)size);
@@ -225,8 +279,10 @@ static bool rom_hash(void) {
     ok = rc_hash_generate_from_buffer(sRomHash, RC_CONSOLE_SUPER_NINTENDO,
                                       rom, (size_t)size) != 0;
   free(rom);                       /* not kept resident */
-  if (!ok)
+  if (!ok) {
     snprintf(sGameLine, sizeof sGameLine, "ROM NOT RECOGNISED");
+    StartupLog("RA: could not hash %s", rom_name);
+  }
   return ok;
 }
 
@@ -256,7 +312,14 @@ static void load_game_done(int result, const char *error_message,
 }
 
 static void load_game(void) {
-  if (!sClient || !rom_hash()) return;
+  if (!sClient) return;
+  if (!rom_hash()) {
+    /* rom_hash has already logged WHY and filled sGameLine for the RA page.
+     * The one thing that must never happen again is this failing in silence. */
+    sIdentified = false;
+    return;
+  }
+  StartupLog("RA: loading game for hash %s", sRomHash);
   rc_client_begin_load_game(sClient, sRomHash, load_game_done, NULL);
 }
 

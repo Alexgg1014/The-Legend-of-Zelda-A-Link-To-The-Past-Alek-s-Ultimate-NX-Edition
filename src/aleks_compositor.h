@@ -38,6 +38,11 @@ void AleksCompositor_Shutdown(void);
 
 void AleksCompositor_CyclePage(void);
 void AleksCompositor_ToggleSettings(void);
+/* ZL+R3 from anywhere, including plain gameplay with the companion closed. */
+void AleksCompositor_OpenSettings(void);
+/* Left-stick companion navigation; dx/dy are -1, 0 or +1 edge transitions.
+ * Returns true when the companion consumed the movement. */
+bool AleksCompositor_StickNav(int dx, int dy);
 
 /* NORMAL-mode companion overlay: same renderer, same page state, temporarily
  * drawn over a dimmed game. */

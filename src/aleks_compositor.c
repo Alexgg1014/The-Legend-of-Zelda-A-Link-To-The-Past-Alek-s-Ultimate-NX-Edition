@@ -35,6 +35,8 @@ void SecondScreenSDL_Shutdown(void);
 SDL_Texture *SecondScreenSDL_GetTexture(void);
 void SecondScreenSDL_TapLocal(int x, int y, int long_press);
 void SecondScreenSDL_CycleTab(void);
+void SecondScreenSDL_CycleTabDir(int dir);
+void SecondScreenSDL_OpenSettings(void);
 void SecondScreenSDL_ToggleSettings(void);
 void SecondScreenSDL_SetTab(int page);
 int SecondScreenSDL_GetTab(void);
@@ -625,6 +627,68 @@ void AleksCompositor_ToggleSettings(void) {
   SecondScreenSDL_ToggleSettings();
 }
 
+/*
+ * GLOBAL SETTINGS (ZL+R3).  v1.0.0 required the companion to already be on
+ * screen -- main.c gated the chord on companion_visible -- so from plain
+ * NORMAL gameplay the shortcut did nothing at all, which is exactly what the
+ * community reported.  The chord is now unconditional and this is what it
+ * does:
+ *
+ *   companion NOT on screen (NORMAL, overlay closed)
+ *       -> open the overlay AND land on SETTINGS, never toggle away from it
+ *   companion on screen, any content page
+ *       -> SETTINGS
+ *   already on SETTINGS
+ *       -> the existing toggle, back to MAP.  Same behaviour as before, so
+ *          the shortcut still has a way out and cannot recurse.
+ */
+void AleksCompositor_OpenSettings(void) {
+  bool was_visible;
+
+  if (!g_ready) return;
+  was_visible = companion_visible();
+  if (current_mode() == ALEKS_LAYOUT_NORMAL && !g_overlay_open)
+    g_overlay_open = true;
+  if (!was_visible)
+    SecondScreenSDL_OpenSettings();
+  else
+    SecondScreenSDL_ToggleSettings();
+}
+
+/*
+ * LEFT STICK, companion navigation.  main.c turns the analog stick straight
+ * into gameplay direction bits and never into button events, so the companion
+ * never saw a single stick movement -- "the joystick doesn't seem to work at
+ * all" in the v1.0.0 report.  This is the stick's own door into the SAME
+ * navigation the D-Pad uses.
+ *
+ * Edge-triggered by the caller.  Deliberately NOT run through
+ * consume_until_release(), which latches a BUTTON index: a synthetic press
+ * there would never see a release and would deafen the real D-Pad.
+ */
+bool AleksCompositor_StickNav(int dx, int dy) {
+  if (!g_ready) return false;
+
+  if (SecondScreenSDL_ConfirmActive()) {
+    if (dx) SecondScreenSDL_ConfirmMove(1);
+    return true;          /* the modal owns the stick too */
+  }
+  /* TRUE MEANS "THE COMPANION HAS THE STICK", not "something moved".  The
+   * caller blanks the gameplay direction bits on true, so Link must not walk
+   * on a movement the menu is using -- including the frames between edges
+   * while the stick is simply held over. */
+  if (!companion_ui_owns_input()) return false;
+
+  if (dy)
+    SecondScreenSDL_MoveSelection(dy < 0 ? -1 : 1);
+  /* Horizontal only walks the tab bar, and only on a content page.  It must
+   * not activate a SETTINGS row: a stray stick nudge changing a setting is
+   * the one thing worse than the stick doing nothing. */
+  else if (dx && !SecondScreenSDL_IsSettingsTab() && !SecondScreenSDL_IsSaveTab())
+    SecondScreenSDL_CycleTabDir(dx < 0 ? -1 : 1);
+  return true;
+}
+
 /* NORMAL-mode companion: open it, and close it back to plain gameplay. */
 void AleksCompositor_ToggleOverlay(void) {
   if (!g_ready) return;
@@ -778,6 +842,17 @@ bool AleksCompositor_SettingsInput(int button) {
     } else {
       return false;
     }
+    consume_until_release(button);
+    return true;
+  }
+
+  /* 4b. A content page (MAP / ITEMS / GEAR / GUIDE) has no row list, so left
+   *     and right walk the tab bar rather than activating nothing.  This is
+   *     the other half of "the cross pad doesn't seem to work at all": on
+   *     those pages it genuinely did nothing at all. */
+  if (!settings_open &&
+      (button == kGamepadBtn_DpadLeft || button == kGamepadBtn_DpadRight)) {
+    SecondScreenSDL_CycleTabDir(button == kGamepadBtn_DpadRight ? 1 : -1);
     consume_until_release(button);
     return true;
   }

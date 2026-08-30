@@ -1193,27 +1193,89 @@ void ZeldaClearAutosave(void) {
   remove("saves/save0.sav");
 }
 
-void SaveLoadSlot(int cmd, int which) {
+/*
+ * SAVE-STATE FILE VALIDATION (ALEKS: public issue #1, "crash when using an
+ * empty save state").
+ *
+ * StateRecorder_Load carries an upstream "todo: fix robustness on invalid
+ * data" and behaves accordingly: it asserts hdr[0] == 1 and reads every
+ * declared block through ReadFromFile(), which calls Die() on a short read.
+ * The Switch build compiles WITHOUT -DNDEBUG, so both of those are live
+ * aborts on hardware rather than the no-ops they are in an upstream release
+ * build.  A zero-length, truncated or foreign saveN.sav therefore terminates
+ * the process instead of being ignored.
+ *
+ * Nothing may be applied to the emulator until the whole file has been shown
+ * to be self-consistent: half-replaced SNES state is worse than no load.  So
+ * the header is read first, the declared block sizes are summed, and the
+ * total is checked against the real file length.  A file that fails is left
+ * strictly alone -- the caller reports "nothing loaded" and the slot keeps
+ * whatever it had.
+ */
+static bool StateFile_IsLoadable(FILE *f) {
+  uint32 hdr[8];
+  long end;
+  uint64 need;
+
+  if (fseek(f, 0, SEEK_END) != 0) return false;
+  end = ftell(f);
+  if (end < (long)sizeof(hdr)) return false;          /* empty or stub */
+  if (fseek(f, 0, SEEK_SET) != 0) return false;
+  if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) return false;
+  if (fseek(f, 0, SEEK_SET) != 0) return false;       /* rewind for the real read */
+
+  if (hdr[0] != 1) return false;                      /* not this format */
+
+  /* Exactly what StateRecorder_Load goes on to consume: header, key log, the
+   * optional base snapshot, then the snes state itself. */
+  need = sizeof(hdr);
+  need += hdr[2];
+  if (hdr[5] & 1) need += hdr[6];
+  need += hdr[6];
+  return need <= (uint64)end;
+}
+
+/* Returns true when the command actually did something.  false means the slot
+ * was missing, unreadable, unusable, or the write failed -- never a crash. */
+bool SaveLoadSlot(int cmd, int which) {
   char name[128];
+  bool ok;
   if (which & 256) {
     if (cmd == kSaveLoad_Save)
-      return;
+      return false;
+    if ((unsigned)(which - 256) >= countof(kReferenceSaves))
+      return false;
     sprintf(name, "saves/ref/%s", kReferenceSaves[which - 256]);
   } else {
     sprintf(name, "saves/save%d.sav", which);
   }
   FILE *f = fopen(name, cmd != kSaveLoad_Save ? "rb" : "wb");
-  if (f) {
-    printf("*** %s slot %d\n",
-      cmd == kSaveLoad_Save ? "Saving" : cmd == kSaveLoad_Load ? "Loading" : "Replaying", which);
+  if (!f)
+    return false;                       /* empty slot: nothing to load */
 
-    if (cmd != kSaveLoad_Save)
-      StateRecorder_Load(&state_recorder, f, cmd == kSaveLoad_Replay);
-    else
-      StateRecorder_Save(&state_recorder, f);
-
+  if (cmd != kSaveLoad_Save) {
+    if (!StateFile_IsLoadable(f)) {
+      fprintf(stderr, "Ignoring unusable save state %s\n", name);
+      fclose(f);
+      return false;
+    }
+    printf("*** %s slot %d\n", cmd == kSaveLoad_Load ? "Loading" : "Replaying", which);
+    StateRecorder_Load(&state_recorder, f, cmd == kSaveLoad_Replay);
     fclose(f);
+    return true;
   }
+
+  printf("*** Saving slot %d\n", which);
+  StateRecorder_Save(&state_recorder, f);
+  /* A partially written state is exactly the file that used to abort the next
+   * load, so a failed write leaves no file behind at all. */
+  ok = (ferror(f) == 0);
+  if (fclose(f) != 0) ok = false;
+  if (!ok) {
+    fprintf(stderr, "Save state write failed, removing %s\n", name);
+    remove(name);
+  }
+  return ok;
 }
 
 typedef struct StateRecoderMultiPatch {

@@ -136,6 +136,11 @@ typedef struct Config {
   bool aleks_companion_hud;
   bool aleks_pixel_perfect;
   uint8 aleks_gameplay_aspect;
+  /* Pixel aspect: false = the 7:6 the SNES was displayed at on a CRT (256x224
+   * fills a 4:3 screen), true = 1:1 square pixels (256x224 shows as 8:7).
+   * ORTHOGONAL to aleks_gameplay_aspect, which chooses how much WORLD is
+   * rendered; this only chooses the shape the finished frame is shown in. */
+  bool aleks_square_pixels;
   uint8 aleks_wide_camera;   // 0 = STANDARD, 1 = FIXED (Esteban)
   uint8 aleks_hud_mode;      // 0 = AUTO, 1 = ON, 2 = OFF
   uint8 aleks_companion_layout;  // 0 = CLASSIC, 1 = TALL

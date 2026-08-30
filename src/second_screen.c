@@ -803,12 +803,15 @@ void SecondScreen_RunFrameHook(void) {
   int state_cmd = g_pending_state_cmd;
   if (state_cmd >= 0) {
     int which = g_pending_state_slot;
+    bool ok;
     g_pending_state_cmd = -1;
     ZeldaApuLock();   // SaveLoadSlot touches audio state (same as HandleCommand)
-    SaveLoadSlot(state_cmd, which);
+    ok = SaveLoadSlot(state_cmd, which);
     ZeldaApuUnlock();
-    // grab the frame drawn just after the save for the slot's thumbnail
-    if (state_cmd == kSaveLoad_Save)
+    // grab the frame drawn just after the save for the slot's thumbnail.
+    // Only for a save that actually landed: a failed write leaves no .sav for
+    // the thumbnail to sit beside, and the slot must stay EMPTY.
+    if (ok && state_cmd == kSaveLoad_Save)
       g_ss_thumb_state = 1;
   }
   uint32 f_on = g_pending_features_on, f_off = g_pending_features_off;

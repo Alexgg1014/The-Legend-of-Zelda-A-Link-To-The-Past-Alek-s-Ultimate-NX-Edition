@@ -581,6 +581,51 @@ static const struct RendererFuncs kSdlRendererFuncs  = {
 void OpenGLRenderer_Create(struct RendererFuncs *funcs, bool use_opengl_es);
 
 #undef main
+/*
+ * SWITCH LIFECYCLE / SRAM SAFETY (ALEKS: GBAtemp report "pressing HOME quit
+ * the game without saving").
+ *
+ * HOME is never seen by this program.  The OS owns it: SDL delivers no
+ * SDL_CONTROLLER_BUTTON_GUIDE press for it, kAleksShortcutButtons (config.c)
+ * deliberately does not list Guide, and the CONTROLS binder explicitly
+ * refuses to capture it (see the capture path in HandleGamepadInput).  So
+ * there is no ALEKS or Zelda action HOME can trigger, and nothing here treats
+ * it as "quit".
+ *
+ * What HOME does is suspend the applet.  The process is only torn down when
+ * the OS asks for it -- the player launching another title, or an applet-mode
+ * NRO being evicted -- and SDL's Switch backend turns that request into
+ * SDL_QUIT.  The real gap was on our side: SRAM was written ONLY by the
+ * game's own save points (select_file.c, messaging.c) and by nothing else, so
+ * an OS-initiated shutdown persisted nothing at all.
+ *
+ * This is the smallest close of that gap.  It is NOT an autosave: it does not
+ * run during play, it does not run on a timer, it changes no defaults, and it
+ * writes exactly the 8 KB the SNES game itself owns.  Vanilla semantics are
+ * preserved -- progress since the player's last in-game save is still lost,
+ * because SRAM does not contain it.
+ */
+/* Cleared when the app comes back to the foreground, so a suspend/resume/
+ * suspend cycle flushes each time rather than only once. */
+static bool g_sram_flushed_this_stop;
+
+static void FlushSramForShutdown(const char *reason) {
+  if (g_sram_flushed_this_stop || g_run_without_emu || !g_zenv.sram) return;
+  /* Never overwrite a good sram.dat with an all-zero buffer: if the emulator
+   * never got far enough to read one in, there is nothing worth persisting
+   * and ZeldaWriteSram would also rotate the .bak away. */
+  for (int i = 0; i < 8192; i++) {
+    if (g_zenv.sram[i] != 0) {
+      g_sram_flushed_this_stop = true;
+      StartupLog("SRAM FLUSH reason=%s", reason);
+      ZeldaWriteSram();
+      StartupLog("SRAM FLUSH COMPLETE");
+      return;
+    }
+  }
+  StartupLog("SRAM FLUSH SKIPPED (empty sram) reason=%s", reason);
+}
+
 int main(int argc, char** argv) {
   StartupLog_Init();
   SetBootStage("[BOOT 01] main entered");
@@ -939,6 +984,30 @@ int main(int argc, char** argv) {
         HandleInput(event.key.keysym.sym, event.key.keysym.mod, false);
         break;
       case SDL_QUIT:
+        /* The OS asked us to go away (HOME -> another title, applet-mode
+         * eviction, or hbmenu close).  Persist before unwinding: the cleanup
+         * below can still be cut short if the request is impatient. */
+        StartupLog("LIFECYCLE: SDL_QUIT");
+        FlushSramForShutdown("sdl-quit");
+        running = false;
+        break;
+      /* Focus transitions.  On Switch these bracket the HOME menu.  Nothing
+       * is redesigned here -- audio already follows g_paused, the renderer and
+       * the RA session are untouched -- the app just makes sure the player's
+       * SRAM is on the card before it can be killed while suspended, and
+       * leaves a line in the log so a hardware report can tell a suspend from
+       * a termination. */
+      case SDL_APP_WILLENTERBACKGROUND:
+        StartupLog("LIFECYCLE: entering background");
+        FlushSramForShutdown("background");
+        break;
+      case SDL_APP_DIDENTERFOREGROUND:
+        StartupLog("LIFECYCLE: returned to foreground");
+        g_sram_flushed_this_stop = false;
+        break;
+      case SDL_APP_TERMINATING:
+        StartupLog("LIFECYCLE: terminating");
+        FlushSramForShutdown("terminating");
         running = false;
         break;
       }
@@ -1040,6 +1109,10 @@ int main(int argc, char** argv) {
    * The thumbnail path is deliberately not involved: it asks the renderer for
    * the next drawn frame, and during shutdown there will not be one.
    */
+  /* Ordinary shutdown.  Same write as the event-loop paths, and the static
+   * latch in there means it happens once per run however we got here. */
+  FlushSramForShutdown("shutdown");
+
   if (g_config.autosave) {
     StartupLog("AUTOSAVE REQUEST reason=quit");
     if (g_audio_ready) {
@@ -1430,12 +1503,20 @@ static void HandleGamepadInput(int button, bool pressed) {
   const uint32 settings_combo = (1u << kGamepadBtn_L2) | (1u << kGamepadBtn_R3);
   bool companion_visible = g_config.aleks_display_mode != ALEKS_DISPLAY_NORMAL ||
                            AleksCompositor_IsOverlayOpen();
-  if ((g_gamepad_modifiers & settings_combo) == settings_combo && companion_visible) {
+  /*
+   * ZL+R3 IS GLOBAL.  It used to carry "&& companion_visible", which made the
+   * one shortcut for Settings unreachable from the very place a player wants
+   * it -- plain NORMAL gameplay with nothing on screen.  The compositor now
+   * brings the companion up itself when it has to, so the gate is gone.
+   * Still edge-triggered by settings_latched and still release-gated by
+   * ConsumeChord, so neither ZL nor R3 leaks into gameplay afterwards.
+   */
+  if ((g_gamepad_modifiers & settings_combo) == settings_combo) {
     if (!settings_latched) {
       settings_latched = true;
-      AleksCompositor_ToggleSettings();
+      AleksCompositor_OpenSettings();
       ConsumeChord(kGamepadBtn_L2, kGamepadBtn_R3);
-      StartupLog("ALEKS settings: toggled");
+      StartupLog("ALEKS settings: opened via ZL+R3");
     }
     return;
   }
@@ -1524,6 +1605,27 @@ static void HandleGamepadAxisInput(int gamepad_id, int axis, int value) {
       };
       uint8 angle = (uint8)(int)(ApproximateAtan2(last_y, last_x) * 64.0f + 0.5f);
       buttons = kSegmentToButtons[(uint8)(angle + 16 + 64) >> 5];
+    }
+    /*
+     * THE COMPANION GETS FIRST REFUSAL, exactly like the button ladder.
+     *
+     * The stick only ever became gameplay direction bits, so no companion
+     * page ever saw it -- the v1.0.0 report that the joystick does nothing in
+     * the companion screen.  The eight-way result is reduced to one edge per
+     * direction and offered to the companion; when the companion owns the pad
+     * it also swallows the movement, so Link cannot walk while the player is
+     * driving a menu with the same stick.
+     */
+    {
+      static int prev_buttons;
+      int newly = buttons & ~prev_buttons;
+      int dx = (newly & (1 << 7)) ? 1 : (newly & (1 << 6)) ? -1 : 0;
+      int dy = (newly & (1 << 5)) ? 1 : (newly & (1 << 4)) ? -1 : 0;
+      prev_buttons = buttons;
+      if (AleksCompositor_StickNav(dx, dy)) {
+        g_gamepad_buttons = 0;
+        return;
+      }
     }
     g_gamepad_buttons = buttons;
   } else if ((axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
