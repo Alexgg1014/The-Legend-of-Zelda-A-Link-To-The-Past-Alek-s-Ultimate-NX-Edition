@@ -11,6 +11,9 @@ have.
 
 ## 1. A fan translation of the US ROM — nothing to install
 
+**This covers Spanish, Polish, Portuguese, Dutch, Swedish and English Redux.**
+They are patches applied to the US ROM, so the game reads them directly.
+
 Drop the `.sfc`/`.smc` into `switch/Zelda3/languages/` and start the game. It is
 picked up automatically, and the result is cached beside it as a `.z3lang` so
 later launches are instant.
@@ -25,7 +28,10 @@ If it doesn't appear, `startup.log` says why. Look for a line starting
 
 ---
 
-## 2. An official PAL ROM (French, German, Spanish…) — build a pack on a PC
+## 2. An official PAL ROM — build a pack on a PC
+
+**This covers French, German, French-Canadian and European English** — the
+cartridges Nintendo actually sold in Europe.
 
 Official European releases use a different text command encoding and store
 everything at different addresses, so the on-device extractor refuses them
@@ -54,7 +60,20 @@ Useful flags:
 | `-o path.z3lang` | write somewhere else |
 | `--self-test rom` | verify the tool against a US ROM |
 
-Supported: `de`, `fr`, `fr-c`, `es`, `pl`, `pt`, `nl`, `sv`, `en`, `redux`, `us`.
+The tool handles every language the project knows, not just the PAL ones:
+
+| code | language | where it comes from |
+|---|---|---|
+| `fr` | French | official PAL cartridge |
+| `de` | German | official PAL cartridge |
+| `fr-c` | French (Canada) | official cartridge |
+| `en` | English (Europe) | official PAL cartridge — a different script from the US one |
+| `es` `pl` `pt` `nl` `sv` `redux` | Spanish, Polish, Portuguese, Dutch, Swedish, English Redux | fan patches of the US ROM |
+| `us` | English | the original US ROM |
+
+The fan-patch rows do not need this tool at all — see route 1 above. They are
+listed because building a pack works for them too, which is handy if you would
+rather keep a 40 KB pack on the card than a 1 MB ROM.
 
 ---
 
