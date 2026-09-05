@@ -375,6 +375,11 @@ bool AleksAspect_Height240(int aspect) {
   return aspect == kAleksAspect_True169Expanded;
 }
 
+/* Set while parsing when the config actually carried an AleksGameplayAspect
+ * key, so ReconcileAleksAspect() can tell "the player chose this" from "the
+ * struct default happened to be 0". */
+static bool g_aleks_aspect_seen;
+
 int AleksAspect_FromExtraSide(int extra) {
   for (int i = 0; i < kAleksAspect_Count; i++)
     if (AleksAspect_ExtraSide(i) == extra) return i;
@@ -636,6 +641,7 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
        * WIDE -- the new geometry gets its own string instead. */
       int aspect = AleksAspect_FromIni(value);
       if (aspect < 0) return false;
+      g_aleks_aspect_seen = true;
       g_config.aleks_gameplay_aspect = (uint8)aspect;
       g_config.extended_aspect_ratio = (uint8)AleksAspect_ExtraSide(aspect);
       if (aspect == kAleksAspect_4x3)
@@ -866,6 +872,9 @@ bool Config_WriteDefaultIni(const char *path) {
     "\n[General]\n"
     "AleksDisplayMode = %s\n"
     "AleksGameplayAspect = %s\n"
+    "; This is the single source of truth for the aspect on this build.\n"
+    "; Upstream ExtendedAspectRatio is still parsed for compatibility but is\n"
+    "; deliberately not written here -- see ReconcileAleksAspect().\n"
     "AleksWideCamera = %s\n"
     "AleksHudMode = %s\n"
     "AleksCompanionLayout = %s\n"
@@ -884,10 +893,9 @@ bool Config_WriteDefaultIni(const char *path) {
     "AleksFlipCompanionScale = %u\n"
     "AleksFlipGap = %u\n"
     "; Autosave is OFF by default; see HARDWARE-HOTFIX-V1.1.md\n"
-    "Autosave = %d\n"
-    "ExtendedAspectRatio = %s\n",
+    "Autosave = %d\n",
     g_config.aleks_display_mode == 1 ? "Dual" : g_config.aleks_display_mode == 2 ? "Flip" : "Normal",
-    g_config.aleks_gameplay_aspect ? "16:9" : "4:3",
+    AleksAspect_IniValue(g_config.aleks_gameplay_aspect),
     g_config.aleks_wide_camera ? "Fixed" : "Standard",
     g_config.aleks_hud_mode == 1 ? "On" : g_config.aleks_hud_mode == 2 ? "Off" : "Auto",
     g_config.aleks_companion_layout ? "Tall" : "Classic",
@@ -899,8 +907,7 @@ bool Config_WriteDefaultIni(const char *path) {
     g_config.aleks_x_item_ring ? "true" : "false",
     g_config.aleks_dual_game_scale, g_config.aleks_dual_companion_scale, g_config.aleks_dual_gap,
     g_config.aleks_flip_game_scale, g_config.aleks_flip_companion_scale, g_config.aleks_flip_gap,
-    g_config.autosave ? 1 : 0,
-    g_config.extended_aspect_ratio ? "16:9" : "4:3");
+    g_config.autosave ? 1 : 0);
 
   fprintf(f,
     "\n[Graphics]\n"
@@ -947,7 +954,49 @@ bool Config_WriteDefaultIni(const char *path) {
   return fclose(f) == 0;
 }
 
+/*
+ * ONE ASPECT WINS (public issue #6, "display settings are reset every launch").
+ *
+ * Two keys described the same thing and they fought.  AleksGameplayAspect sets
+ * the ALEKS enum AND derives extended_aspect_ratio from it; upstream's
+ * ExtendedAspectRatio sets only the latter and leaves the enum stale.  The
+ * generated config wrote BOTH, with ExtendedAspectRatio LAST -- and last wins.
+ * Meanwhile the settings UI only ever rewrites AleksGameplayAspect.  So every
+ * launch silently reverted the aspect to whatever ExtendedAspectRatio said,
+ * which is "4:3" in every file this build has ever generated.  Editing the ini
+ * by hand did not help either, for exactly the same reason.
+ *
+ * The ALEKS enum is what the UI writes and what the player picked, so when the
+ * file carried one it wins and everything derived is recomputed from it here.
+ * That includes extend_y, which NO parser ever set: True 16:9 Expanded needs
+ * 240 rendered lines and would otherwise have booted at 224 even once the
+ * aspect itself survived.
+ *
+ * When the file carried no ALEKS key -- an upstream config, or a hand-written
+ * one -- extended_aspect_ratio is left exactly as given and only the enum is
+ * derived from it, so this can never quietly rewrite somebody else's setting.
+ */
+static void ReconcileAleksAspect(void) {
+  int aspect;
+
+  if (!g_aleks_aspect_seen) {
+    g_config.aleks_gameplay_aspect =
+        (uint8)AleksAspect_FromExtraSide(g_config.extended_aspect_ratio);
+    return;
+  }
+  aspect = g_config.aleks_gameplay_aspect;
+  if (aspect < 0 || aspect >= kAleksAspect_Count) aspect = kAleksAspect_4x3;
+  g_config.aleks_gameplay_aspect = (uint8)aspect;
+  g_config.extended_aspect_ratio = (uint8)AleksAspect_ExtraSide(aspect);
+  g_config.extend_y = AleksAspect_Height240(aspect);
+  if (aspect == kAleksAspect_4x3)
+    g_config.features0 &= ~(kFeatures0_ExtendScreen64 | kFeatures0_WidescreenVisualFixes);
+  else
+    g_config.features0 |= kFeatures0_ExtendScreen64 | kFeatures0_WidescreenVisualFixes;
+}
+
 void ParseConfigFile(const char *filename) {
+  g_aleks_aspect_seen = false;
   Config_SetDefaults();
 
   if (filename != NULL || !ParseOneConfigFile("zelda3.user.ini", 0)) {
@@ -956,6 +1005,7 @@ void ParseConfigFile(const char *filename) {
     if (!ParseOneConfigFile(filename, 0))
       fprintf(stderr, "Warning: Unable to read config file %s\n", filename);
   }
+  ReconcileAleksAspect();
   RegisterDefaultKeys();
 }
 

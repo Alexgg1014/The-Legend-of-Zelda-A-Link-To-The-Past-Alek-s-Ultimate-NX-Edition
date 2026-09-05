@@ -56,7 +56,7 @@ CFILES := $(wildcard $(SRC_DIR)/src/*.c $(SRC_DIR)/src/platform/switch/*.c $(SRC
 INCLUDES	:=	$(SRC_DIR) $(SRC_DIR)/src $(SRC_DIR)/third_party/opus-1.3.1-stripped $(SRC_DIR)/third_party/rcheevos/include $(SRC_DIR)/third_party/rcheevos/src
 APP_TITLE   :=  Zelda LTTP - ALEKS Ultimate
 APP_AUTHOR  :=  ALEKS - based on snesrev/zelda3
-APP_VERSION :=  1.1.0
+APP_VERSION :=  1.1.1
 ROMFS       :=  romfs
 
 #---------------------------------------------------------------------------------

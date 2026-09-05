@@ -18,6 +18,7 @@
 #include "zelda_rtl.h"
 #include "snes/ppu.h"
 #include "second_screen_tables.h"
+#include "aleks_lang.h"
 
 // Save-state thumbnail size, in the 8:7 shape of the 256x224 SNES picture.
 // The JNI/Java sides hardcode the same numbers (as the other render_* do).
@@ -798,6 +799,27 @@ void SecondScreen_RunFrameHook(void) {
     g_ss_has_outdoor = false;
     ZeldaApuLock();
     ZeldaReset(true);
+    /*
+     * APPLY THE LANGUAGE ON THE SAME BEAT AS THE RESET (public issue #5).
+     *
+     * The modal says "RESTART TO APPLY LANGUAGE?" and this is the restart it
+     * offers -- but ZeldaSetLanguage() was only ever called from main(), so
+     * this path reset the engine and left the dialogue and font blocks on
+     * whatever they already were.  The player picked their language, said yes,
+     * watched the game reset, and got English back: the setting was stored
+     * correctly (the ini shows "Language = BR") and simply never applied.
+     * Only a full quit-and-relaunch worked, and nothing told anyone that.
+     *
+     * Swapping the blocks mid-gameplay is the risky path -- it is what crashed
+     * on the way back to English -- which is why this lives HERE and not in the
+     * settings row.  Immediately after ZeldaReset, with RAM wiped, the APU held
+     * and nothing drawn since, is structurally the same moment as boot, and
+     * boot is the path that is known to work.
+     */
+    if (AleksLang_CurrentIndex() == 0)
+      ZeldaSetLanguage(NULL);          /* built-in English, incl. the fallback */
+    else
+      ZeldaSetLanguage(g_config.language);
     ZeldaApuUnlock();
   }
   int state_cmd = g_pending_state_cmd;

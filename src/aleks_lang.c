@@ -20,7 +20,23 @@
 #include "aleks_crashctx.h"
 
 #define LANG_DIR "languages"
-#define PACK_MAGIC "AZL2"
+/*
+ * PACK FORMAT.
+ *
+ * AZL2: 52-byte header, magic / u32 dialogue size / u32 font size /
+ *       code[16] / display[24].  Text is always US-encoded.
+ * AZL3: same, but display is 20 bytes and byte 48 carries the dialogue FLAGS
+ *       the engine needs -- bit 0 selects the EU command encoding, which is
+ *       what a PAL ROM or a European translation is written in.  Without a way
+ *       to say that, every pack was decoded as US and only US-layout ROMs
+ *       could ever work.  AZL2 packs are still read and assumed US.
+ */
+#define PACK_MAGIC   "AZL3"
+#define PACK_MAGIC_V2 "AZL2"
+/* flag 2 = "text no longer matches the US ROM", which disables the emulator
+ * compare path.  flag 1 = EU command encoding (messaging.c, Text_DecodeCmd). */
+#define LANG_FLAG_NOT_US  2
+#define LANG_FLAG_EU_TEXT 1
 
 /* ---- ROM layout of the stock US text engine (donor constants) ---------- */
 #define ROM_SIZE          1048576
@@ -333,7 +349,7 @@ static int g_lang_count;        /* extracted ones; the UI adds English at 0 */
 /* Blobs handed to the asset arrays.  Never freed: they are live asset data
  * for the rest of the process, exactly like the mapped .dat. */
 static bool register_language(const char *code, const char *display,
-                              const Buf *dialogue, const Buf *font) {
+                              uint8 flags, const Buf *dialogue, const Buf *font) {
   Arr dlg, fnt, map, two;
   Buf pdlg = {0}, pfnt = {0}, pmap = {0}, conf_blk = {0};
   uint8 conf[3];
@@ -351,9 +367,9 @@ static bool register_language(const char *code, const char *display,
 
   idx = dlg.n;                      /* the new language's index in both arrays */
   conf[0] = (uint8)idx; conf[1] = (uint8)idx;
-  /* flag 2 = "text no longer matches the US ROM", which is what disables the
-   * emulator-compare path.  Flag 1 (PAL command encoding) is never emitted. */
-  conf[2] = 2;
+  /* Always "not the US text"; the EU-encoding bit comes from the source, so a
+   * PAL ROM or a European translation decodes with the right command table. */
+  conf[2] = (uint8)(LANG_FLAG_NOT_US | (flags & LANG_FLAG_EU_TEXT));
 
   if (!arr_add(&dlg, dialogue->p, dialogue->n)) goto done;
   if (!arr_add(&fnt, font->p, font->n)) goto done;
@@ -391,7 +407,7 @@ done:
 /* Layout: "AZL1", u32 dialogue size, u32 font size, then the two blobs.  Small
  * (~40 KB) and derived entirely from the user's own ROM. */
 static bool pack_write(const char *key, const char *code, const char *display,
-                       const Buf *dialogue, const Buf *font) {
+                       uint8 flags, const Buf *dialogue, const Buf *font) {
   char tmp[160], dst[160];
   FILE *f;
   uint8 hdr[52];
@@ -405,7 +421,8 @@ static bool pack_write(const char *key, const char *code, const char *display,
   wr32(hdr + 4, (uint32)dialogue->n);
   wr32(hdr + 8, (uint32)font->n);
   snprintf((char *)hdr + 12, 16, "%s", code);
-  snprintf((char *)hdr + 28, 24, "%s", display);
+  snprintf((char *)hdr + 28, 20, "%s", display);
+  hdr[48] = flags;
   ok = fwrite(hdr, 1, sizeof hdr, f) == sizeof hdr &&
        fwrite(dialogue->p, 1, dialogue->n, f) == dialogue->n &&
        fwrite(font->p, 1, font->n, f) == font->n;
@@ -418,7 +435,7 @@ static bool pack_write(const char *key, const char *code, const char *display,
 }
 
 static bool pack_read(const char *key, char *code, size_t code_cap,
-                      char *display, size_t disp_cap,
+                      char *display, size_t disp_cap, uint8 *flags,
                       Buf *dialogue, Buf *font) {
   char path[160];
   FILE *f;
@@ -428,11 +445,19 @@ static bool pack_read(const char *key, char *code, size_t code_cap,
   snprintf(path, sizeof path, LANG_DIR "/%s.z3lang", key);
   f = fopen(path, "rb");
   if (!f) return false;
-  if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr ||
-      memcmp(hdr, PACK_MAGIC, 4) != 0) goto done;
+  if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr) goto done;
+  if (memcmp(hdr, PACK_MAGIC, 4) == 0) {
+    hdr[47] = 0;                            /* AZL3: display is 20 bytes */
+    *flags = hdr[48];
+  } else if (memcmp(hdr, PACK_MAGIC_V2, 4) == 0) {
+    hdr[51] = 0;                            /* AZL2: display is 24, US text */
+    *flags = 0;
+  } else {
+    goto done;
+  }
   dn = rd32(hdr + 4); fn = rd32(hdr + 8);
   if (dn == 0 || fn == 0 || dn > (8u << 20) || fn > (1u << 20)) goto done;
-  hdr[27] = 0; hdr[51] = 0;                 /* the strings are fixed fields */
+  hdr[27] = 0;                              /* code is a fixed field */
   snprintf(code, code_cap, "%s", (const char *)hdr + 12);
   snprintf(display, disp_cap, "%s", (const char *)hdr + 28);
   if (!code[0]) goto done;
@@ -476,14 +501,16 @@ static void try_rom(const char *filename) {
   long size;
   uint8 *rom = NULL;
   size_t off = 0;
+  uint8 flags = 0;
   Buf dialogue = {0}, font = {0};
 
   key_from_filename(filename, key, sizeof key);
 
   /* A cached pack means this file has already been read once; it also carries
    * its own name, so nothing has to be re-derived from the ROM. */
-  if (pack_read(key, code, sizeof code, display, sizeof display, &dialogue, &font)) {
-    if (register_language(code, display, &dialogue, &font))
+  if (pack_read(key, code, sizeof code, display, sizeof display, &flags,
+                &dialogue, &font)) {
+    if (register_language(code, display, flags, &dialogue, &font))
       StartupLog("LANGUAGE PACK: %s loaded from cache", code);
     buf_free(&dialogue); buf_free(&font);
     return;
@@ -535,12 +562,64 @@ static void try_rom(const char *filename) {
   }
   free(rom);                                 /* never kept resident */
 
-  if (register_language(code, display, &dialogue, &font)) {
-    pack_write(key, code, display, &dialogue, &font);   /* best effort cache */
+  if (register_language(code, display, 0, &dialogue, &font)) {
+    /* A ROM this build can lift is US-layout by definition -- build_blobs
+     * knows no other offsets -- so it is never EU-encoded. */
+    pack_write(key, code, display, 0, &dialogue, &font);  /* best effort cache */
     StartupLog("LANGUAGE EXTRACT: success (%s)", code);
   } else {
     StartupLog("LANGUAGE EXTRACT: could not register %s", code);
   }
+  buf_free(&dialogue);
+  buf_free(&font);
+}
+
+/* Already registered?  A pack that the ROM pass just produced must not be
+ * added a second time from its own cache file. */
+static bool lang_have_code(const char *code) {
+  for (int i = 0; i < g_lang_count; i++)
+    if (strcmp(g_langs[i].code, code) == 0) return true;
+  return false;
+}
+
+/*
+ * A STANDALONE .z3lang PACK (public issue #6).
+ *
+ * languages/ used to be scanned for ROMs only, and a .z3lang was consulted
+ * solely as a cache sitting beside the ROM that produced it.  That left every
+ * language this build cannot lift on-device with no way in at all -- official
+ * PAL ROMs, whose text uses the EU command encoding and different offsets, and
+ * translations that only exist as a dialogue .txt.  The engine can already
+ * RENDER both (see the EU branch of Text_DecodeCmd in messaging.c); it was
+ * only the on-device extractor that could not produce them.
+ *
+ * A pack is self-contained -- it carries its own code and display name -- so
+ * loading one needs nothing beyond the reader that already existed.  Packs are
+ * built off-device by tools/make_language_pack.py from the user's OWN ROM or
+ * their own dialogue/font files.  Nothing copyrighted ships with this build or
+ * is fetched by it, which is the same rule the on-device extractor follows.
+ */
+static void try_pack(const char *filename) {
+  char key[64], code[16], display[24];
+  uint8 flags = 0;
+  Buf dialogue = {0}, font = {0};
+
+  key_from_filename(filename, key, sizeof key);
+  if (!pack_read(key, code, sizeof code, display, sizeof display, &flags,
+                 &dialogue, &font)) {
+    StartupLog("LANGUAGE PACK: %s is unreadable or not a pack", filename);
+    return;
+  }
+  if (lang_have_code(code)) {          /* the ROM beside it already registered */
+    buf_free(&dialogue);
+    buf_free(&font);
+    return;
+  }
+  if (register_language(code, display, flags, &dialogue, &font))
+    StartupLog("LANGUAGE PACK: %s loaded (%s%s)", filename, code,
+               (flags & LANG_FLAG_EU_TEXT) ? ", EU text" : "");
+  else
+    StartupLog("LANGUAGE PACK: could not register %s", code);
   buf_free(&dialogue);
   buf_free(&font);
 }
@@ -569,6 +648,20 @@ void AleksLang_Init(void) {
     try_rom(ent->d_name);
   }
   closedir(dir);
+
+  /* SECOND PASS: packs that no scanned ROM produced.  It runs after the ROM
+   * pass so a ROM the player actually has always wins over a stale pack made
+   * from it, and try_pack() skips any code the first pass already claimed. */
+  dir = opendir(LANG_DIR);
+  if (dir) {
+    while ((ent = readdir(dir)) != NULL) {
+      const char *dot = strrchr(ent->d_name, '.');
+      if (!dot || strcasecmp(dot, ".z3lang") != 0) continue;
+      if (g_lang_count >= MAX_LANGS) break;
+      try_pack(ent->d_name);
+    }
+    closedir(dir);
+  }
 
   if (g_lang_count)
     StartupLog("LANGUAGE: %d extra language(s) available", g_lang_count);

@@ -643,16 +643,31 @@ void AleksCompositor_ToggleSettings(void) {
  *          the shortcut still has a way out and cannot recurse.
  */
 void AleksCompositor_OpenSettings(void) {
-  bool was_visible;
-
   if (!g_ready) return;
-  was_visible = companion_visible();
+
+  /*
+   * SECOND PRESS GETS YOU OUT.
+   *
+   * Same button in, same button out.  It used to hand you back to MAP, which
+   * left the companion still owning the pad and the overlay still up -- you
+   * had opened Settings with one chord and then needed a different control to
+   * get back to Link.  Now ZL+R3 on SETTINGS drops the menu entirely: in
+   * NORMAL that closes the overlay and returns to plain gameplay, and in
+   * DUAL/FLIP -- where the companion is always on screen by design -- it drops
+   * the interactive page so the pad belongs to Link again.
+   */
+  if (SecondScreenSDL_IsSettingsTab()) {
+    SecondScreenSDL_LeaveTransientPage();   /* clears any modal, back to MAP */
+    if (normal_overlay_active())
+      close_overlay();
+    return;
+  }
+
+  /* Anything else is an open: bring the companion up if it is not showing and
+   * land on SETTINGS, never toggling away from it. */
   if (current_mode() == ALEKS_LAYOUT_NORMAL && !g_overlay_open)
     g_overlay_open = true;
-  if (!was_visible)
-    SecondScreenSDL_OpenSettings();
-  else
-    SecondScreenSDL_ToggleSettings();
+  SecondScreenSDL_OpenSettings();
 }
 
 /*
