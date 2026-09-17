@@ -808,6 +808,7 @@ void Config_SetDefaults(void) {
   g_config.ignore_aspect_ratio = false;
   g_config.linear_filtering = false;
   g_config.output_method = kOutputMethod_SDL;
+  g_config.shader = NULL;
   g_config.extended_aspect_ratio = 0;  // 4:3; must agree with aleks_gameplay_aspect
   g_config.extend_y = false;
 
@@ -817,6 +818,20 @@ void Config_SetDefaults(void) {
   g_config.audio_channels = 2;
   g_config.audio_samples = 1024;
   g_config.enable_msu = 0;
+  /*
+   * MSU-1 PACK LOCATION.
+   *
+   * MSUPath is a filename PREFIX, not a directory: audio.c builds
+   * "<MSUPath><track>.pcm".  It used to default to empty, so playback looked
+   * for "1.pcm" in the runtime root -- while the SETTINGS row probes
+   * "msu/alttp_msu-1.pcm" to decide whether to show NO PACK.  The two never
+   * agreed, the key was not written into the generated config, and nothing
+   * documented it, so a correctly installed pack still reported NO PACK.
+   *
+   * The default is now the layout the probe already expects and the one every
+   * ALTTP MSU-1 pack ships with, so dropping a pack in msu/ just works.
+   */
+  g_config.msu_path = "msu/alttp_msu-";
   g_config.msuvolume = 100;
 
   // --- gameplay -----------------------------------------------------------
@@ -836,7 +851,7 @@ void Config_SetDefaults(void) {
   g_config.aleks_touch_ui = true;
   g_config.aleks_tap_equip = true;
   g_config.aleks_x_item_ring = false;
-  g_config.aleks_story_guide = 0;          // OFF (no content yet)
+  g_config.aleks_story_guide = 2;          // HINTS: native guide now has content
   g_config.aleks_scaling_mode = 1;
   // Layout numbers from the final ALEKS TMC defaults.
   g_config.aleks_dual_game_scale = 100;
@@ -885,7 +900,7 @@ bool Config_WriteDefaultIni(const char *path) {
     "AleksTouchUI = %s\n"
     "AleksTapToEquip = %s\n"
     "AleksXItemRing = %s\n"
-    "AleksStoryGuide = Off\n"
+    "AleksStoryGuide = Hints\n"
     "AleksDualGameScale = %u\n"
     "AleksDualCompanionScale = %u\n"
     "AleksDualGap = %u\n"
@@ -917,11 +932,21 @@ bool Config_WriteDefaultIni(const char *path) {
     "NewRenderer = %d\n"
     "EnhancedMode7 = %d\n"
     "IgnoreAspectRatio = %d\n"
-    "NoSpriteLimits = %d\n",
+    "NoSpriteLimits = %d\n"
+    "; Renderer and shader can also be changed in SETTINGS -> SCREEN.\n"
+    "OutputMethod = %s\n"
+    "LinearFiltering = %s\n"
+    "; Put .glsl/.glslp files beside this ini; shaders require OpenGL.\n"
+    "Shader = %s\n",
     g_config.window_width, g_config.window_height,
     g_config.fullscreen, g_config.window_scale,
     g_config.new_renderer ? 1 : 0, g_config.enhanced_mode7 ? 1 : 0,
-    g_config.ignore_aspect_ratio ? 1 : 0, g_config.no_sprite_limits ? 1 : 0);
+    g_config.ignore_aspect_ratio ? 1 : 0, g_config.no_sprite_limits ? 1 : 0,
+    g_config.output_method == kOutputMethod_SDLSoftware ? "SDL-Software" :
+    g_config.output_method == kOutputMethod_OpenGL ? "OpenGL" :
+    g_config.output_method == kOutputMethod_OpenGL_ES ? "OpenGL ES" : "SDL",
+    g_config.linear_filtering ? "true" : "false",
+    g_config.shader ? g_config.shader : "");
 
   fprintf(f,
     "\n[Sound]\n"
@@ -929,9 +954,13 @@ bool Config_WriteDefaultIni(const char *path) {
     "AudioFreq = %u\n"
     "AudioChannels = %u\n"
     "AudioSamples = %u\n"
-    "EnableMSU = %u\n",
+    "EnableMSU = %u\n"
+    "; MSU-1 music: a filename PREFIX, so track 1 is <MSUPath>1.pcm.\n"
+    "; The default matches how ALTTP MSU-1 packs are normally named.\n"
+    "MSUPath = %s\n",
     g_config.enable_audio ? 1 : 0, g_config.audio_freq,
-    g_config.audio_channels, g_config.audio_samples, g_config.enable_msu);
+    g_config.audio_channels, g_config.audio_samples, g_config.enable_msu,
+    g_config.msu_path ? g_config.msu_path : "msu/alttp_msu-");
 
   fprintf(f,
     "\n[Features]\n"

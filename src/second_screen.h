@@ -43,6 +43,7 @@ int SS_GetEquippedSlotX(void);
 int SS_GetDungeon(void);
 void SS_ReadSram(uint8 *out, int n);
 void SS_ReadDungFlags(uint8 *out, int n);
+bool SS_GetMirrorPortal(int *out);
 bool SS_GetIndoorExit(int *out);
 bool SS_RenderIconSheet(uint32 *pixels);
 bool SS_RenderGlyphSheet(uint32 *pixels);

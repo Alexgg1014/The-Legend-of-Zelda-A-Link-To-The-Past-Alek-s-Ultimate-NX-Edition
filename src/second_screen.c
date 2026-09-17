@@ -125,6 +125,24 @@ static bool g_ss_has_outdoor;
 // 0x104) exit via cached entrance data instead, and matching the table's
 // special-screen pseudo-rooms (0x180+) would return coordinates in the special
 // areas' own tiny space, parking the marker in the Lost Woods (issue #23).
+// Where the Magic Mirror will drop Link back into the light world, i.e. the
+// portal slot the game itself draws on the world map. Same condition as
+// WorldMap_HandleSprites in messaging.c: light world only (the engine tests
+// BYTE(overworld_screen_index) < 0x40) and a non-zero slot 15.
+// Upstream zelda-alttp-3ds v3.0.
+bool SS_GetMirrorPortal(int *out) {
+  const int k = 15;
+  if (BYTE(overworld_screen_index) >= 0x40)
+    return false;
+  unsigned x = bird_travel_x_hi[k] << 8 | bird_travel_x_lo[k];
+  unsigned y = bird_travel_y_hi[k] << 8 | bird_travel_y_lo[k];
+  if (!(x | y))
+    return false;
+  out[0] = (int)x;
+  out[1] = (int)y;
+  return true;
+}
+
 bool SS_GetIndoorExit(int *out) {
   if (g_ss_has_outdoor) {
     out[0] = g_ss_outdoor_pos[0];

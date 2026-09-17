@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "version": "1.2.0",
+  "channel": "stable",
+  "nro_url": "https://github.com/Alexgg1014/The-Legend-of-Zelda-A-Link-To-The-Past-Alek-s-Ultimate-NX-Edition/releases/download/v1.2.0/Zelda3-ALEKS-NX-v1.2.0.nro",
+  "nro_sha256": "c1f03b59c36ed0ef84c7d0868ccce3a75f7b8e52df2633454e36964bcee140b0",
+  "nro_size": 8842534,
+  "min_updater_schema": 1,
+  "changelog": [
+    "Renderer and GLSL shader selection in the GUI",
+    "In-game updates from Settings > System > Update",
+    "Native offline Story Guide",
+    "Map screens fixed for widescreen and mirror return marker"
+  ]
+}

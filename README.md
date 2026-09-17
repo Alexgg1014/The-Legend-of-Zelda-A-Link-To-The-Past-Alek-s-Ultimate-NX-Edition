@@ -122,6 +122,20 @@ display mode. It is driven by pad or by touch.
 
 ---
 
+## Renderer and Shaders
+
+Open **Settings → Screen → Renderer and Shader** to choose the output backend,
+linear filtering, or a GLSL shader without editing `zelda3.ini` by hand.
+
+Put shader presets directly beside the NRO in `sdmc:/switch/Zelda3/`. The
+picker discovers `.glsl` and `.glslp` files, lists them alphabetically, and
+always includes **OFF**. Shader processing requires the **OpenGL** or
+**OpenGL ES** renderer. Graphics changes are saved immediately and applied
+after a restart; the confirmation defaults to **NO**, so merely browsing the
+menu never interrupts play.
+
+---
+
 ## Quality of Life
 
 The engine's optional gameplay fixes, each individually switchable under
@@ -327,6 +341,7 @@ sdmc:/switch/Zelda3/
 ├── zelda3.sfc            your USA ROM  <- required, keep it here
 ├── zelda3_assets.dat     generated on first run from the ROM above
 ├── zelda3.ini            generated; all settings live here
+├── *.glsl / *.glslp      optional shader files shown in the GUI
 ├── saves/                SRAM and save states
 ├── languages/            optional translation ROMs (es.smc, ...) and their packs
 ├── msu/                  optional MSU-1 audio
@@ -361,6 +376,7 @@ plainly what that does and does not cover.
 - Quick Items as quick *use*
 - Docked 1920×1080 output
 - Language switching round-trip
+- Renderer/shader selection and shader discovery from the Zelda3 root
 
 Anything not listed above should be treated as untested rather than assumed
 working.
@@ -372,10 +388,10 @@ working.
 - RetroAchievements Hardcore is not supported.
 - Language support depends on the translation ROM's layout, not its language.
 - Changing language requires a restart.
+- Changing the renderer, shader or linear filtering requires a restart.
 - True 16:9 Expanded's extra vertical view depends on the current area having
   world below the normal viewport; where it does not, a black band appears.
-- The companion's Guide page is a placeholder — no story guide content exists
-  yet, and it is off by default.
+- The native Story Guide content is currently English-only.
 
 ---
 

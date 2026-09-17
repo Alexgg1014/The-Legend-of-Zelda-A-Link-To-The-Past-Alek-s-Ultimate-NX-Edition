@@ -9,6 +9,7 @@
 #ifdef __SWITCH__
 #include <switch.h>
 #include "platform/switch/switch_first_run.h"
+#include "platform/switch/aleks_update.h"
 #endif
 #ifdef _WIN32
 #include "platform/win32/volume_control.h"
@@ -629,6 +630,11 @@ static void FlushSramForShutdown(const char *reason) {
 int main(int argc, char** argv) {
   StartupLog_Init();
   SetBootStage("[BOOT 01] main entered");
+#ifdef __SWITCH__
+  /* hbloader's argv[0] is the NRO this process runs from.  The updater
+   * replaces THAT file, so it is recorded before argv is shifted. */
+  AleksUpdate_SetLaunchPath(argc > 0 ? argv[0] : NULL);
+#endif
   argc--, argv++;
   const char *config_file = NULL;
   if (argc >= 2 && strcmp(argv[0], "--config") == 0) {
@@ -891,6 +897,11 @@ int main(int argc, char** argv) {
    * when enabled it only creates the client -- the login is deferred until
    * after the first frame, so nothing here can delay or block the boot. */
   AleksRA_Init();
+#ifdef __SWITCH__
+  /* In-game updater: one background manifest fetch, nothing on the SD is
+   * touched until the player asks.  Never blocks the boot. */
+  AleksUpdate_Start();
+#endif
 
   for (int i = 0; i < SDL_NumJoysticks(); i++)
     OpenOneGamepad(i);
@@ -1138,8 +1149,11 @@ int main(int argc, char** argv) {
 
   g_renderer_funcs.Destroy();
 
-  /* Before SDL and the network go away: joins the badge worker and destroys
-   * the RA client. */
+  /* Before SDL and the network go away: joins the update and badge workers
+   * and destroys the RA client. */
+#ifdef __SWITCH__
+  AleksUpdate_Shutdown();
+#endif
   AleksRA_Shutdown();
 
   SDL_DestroyWindow(window);
@@ -1148,7 +1162,7 @@ int main(int argc, char** argv) {
    * unclean. */
   AleksCrash_MarkCleanShutdown();
 #ifdef __SWITCH__
-  romfsExit();
+  AleksSwitch_RomfsRelease();   /* idempotent: an install may have done it */
 #endif
   //SaveConfigFile();
   return 0;

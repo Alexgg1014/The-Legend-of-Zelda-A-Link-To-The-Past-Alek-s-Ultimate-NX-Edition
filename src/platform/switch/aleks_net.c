@@ -26,6 +26,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* cwd is sdmc:/switch/tmc (port_main chdir'd there before the game starts). */
 #ifndef TMC_RELEASE
@@ -90,7 +91,16 @@ int Port_Swkbd_Get(const char* header, int password, char* out, size_t out_cap) 
  * are already rejected earlier (issue #17), so the default socket config (which
  * reserves ~1-2 MiB of transfer memory) is fine — we only ever run in
  * Application mode with full memory here. */
+/* Refcounted: RetroAchievements and the updater each hold the network
+ * independently, and either may come up first or go down first.  The socket
+ * service and curl_global_* are brought up on the first holder and torn down
+ * on the last.  Both callers are on the main thread. */
+static int sNetRefs;
+
 void Port_Net_Init(void) {
+    if (sNetRefs++ > 0) {
+        return;
+    }
     Result rc = socketInitializeDefault();
     if (R_FAILED(rc)) {
         nlog("[net] socketInitializeDefault failed: 0x%x\n", rc);
@@ -103,6 +113,9 @@ void Port_Net_Init(void) {
 }
 
 void Port_Net_Exit(void) {
+    if (sNetRefs == 0 || --sNetRefs > 0) {
+        return;
+    }
     if (!sNetReady) {
         return;
     }
@@ -147,6 +160,30 @@ typedef struct {
     size_t len;
     int overflow;
 } BinaryBuf;
+
+typedef struct {
+    FILE* file;
+    size_t expected;
+    size_t written;
+    volatile unsigned* progressPermille;
+    int failed;
+} DownloadFileCtx;
+
+static size_t write_download_file_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    DownloadFileCtx* d = (DownloadFileCtx*)userdata;
+    size_t bytes = size * nmemb;
+    if (bytes == 0) return 0;
+    if (d->written > d->expected || bytes > d->expected - d->written ||
+        fwrite(ptr, 1, bytes, d->file) != bytes) {
+        d->failed = 1;
+        return 0;
+    }
+    d->written += bytes;
+    if (d->progressPermille && d->expected) {
+        *d->progressPermille = (unsigned)((d->written * 1000u) / d->expected);
+    }
+    return bytes;
+}
 
 static size_t write_binary_bounded_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     size_t incoming = size * nmemb;
@@ -321,6 +358,64 @@ long Port_Net_HttpGetBinaryBounded(const char* url, size_t max_bytes,
     }
     free(body);
     curl_easy_cleanup(curl);
+    return status;
+}
+
+/* HTTPS-only stream download for the updater. No HTTP fallback and no
+ * non-HTTPS redirect are permitted. The final size is enforced in the
+ * callback as a second line of defence before the update layer reopens and
+ * hashes the file. On any failure the partial file is removed -- `dest` is
+ * the fixed staging path, never the installed NRO. */
+long Port_Net_HttpDownloadFile(const char* url, const char* dest, size_t expected_bytes,
+                               volatile unsigned* progress_permille) {
+    CURL* curl;
+    FILE* out;
+    DownloadFileCtx d;
+    CURLcode res;
+    long status = -3;
+
+    if (progress_permille) *progress_permille = 0;
+    if (!sNetReady || !url || !dest || strncmp(url, "https://", 8) != 0 ||
+        expected_bytes == 0) return -1;
+    out = fopen(dest, "wb");
+    if (!out) return -4;
+    curl = curl_easy_init();
+    if (!curl) { fclose(out); return -2; }
+    memset(&d, 0, sizeof(d));
+    d.file = out;
+    d.expected = expected_bytes;
+    d.progressPermille = progress_permille;
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ALEKS-NX-Updater/1");
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, (long)CURLPROTO_HTTPS);
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long)CURLPROTO_HTTPS);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_download_file_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &d);
+    res = curl_easy_perform(curl);
+    if (res == CURLE_OK && !d.failed && d.written == expected_bytes) {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    } else {
+        nlog("[net] download %s: curl=%d failed=%d written=%zu/%zu\n",
+             url, (int)res, d.failed, d.written, expected_bytes);
+    }
+    curl_easy_cleanup(curl);
+    if (fflush(out) != 0) status = -5;
+    {
+        int fd = fileno(out);
+        if (fd >= 0) (void)fsync(fd);
+    }
+    if (fclose(out) != 0) status = -5;
+    if (status < 200 || status >= 300) {
+        (void)remove(dest);
+        return status == -3 && d.failed ? -6 : status;
+    }
+    if (progress_permille) *progress_permille = 1000;
     return status;
 }
 

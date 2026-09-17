@@ -16,6 +16,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __SWITCH__
+#include <dirent.h>
+#endif
 
 #ifdef __3DS__
 #include <3ds.h>
@@ -57,6 +60,10 @@ enum Platform3DSCStickMode {
 #include "aleks_crashctx.h"
 #include "aleks_ra.h"
 #include "aleks_lang.h"
+#include "aleks_version.h"
+#ifdef __SWITCH__
+#include "platform/switch/aleks_update.h"
+#endif
 #endif
 
 #ifndef ZELDA3_3DS_VERSION
@@ -113,6 +120,7 @@ bool SS_TakeThumbnail(uint32_t *out);
 void SS_SetAutosave(bool on);
 int  SS_GetLinkFacing(void);
 bool SS_RenderLinkFacingMarker(uint32_t *px, int facing);
+bool SS_GetMirrorPortal(int *out);
 
 // palette (MinimapView)
 #define COL(r,g,b) (0xff000000u | ((r) << 16) | ((g) << 8) | (b))
@@ -245,10 +253,11 @@ static RectFS screen_row_r[4], screen_back_r;
  * same rule the final TMC panel follows).
  * ------------------------------------------------------------------ */
 enum {
-  SW_ROOT, SW_SCREEN, SW_DUAL, SW_FLIP, SW_GAMEPLAY,
+  SW_ROOT, SW_SCREEN, SW_GRAPHICS, SW_DUAL, SW_FLIP, SW_GAMEPLAY,
   SW_RETRO,
   SW_QOL, SW_ADVANCED, SW_CONTROLS, SW_SHORTCUTS,
   SW_AUDIO, SW_SYSTEM, SW_STATES,
+  SW_UPDATE,
 };
 
 #define SW_MAX_ROWS 20
@@ -268,6 +277,16 @@ static int sw_row_count, sw_visible;
 static RectFS sw_row_r[SW_MAX_VISIBLE], sw_back_r, sw_up_r, sw_down_r;
 static SwRow sw_rows[SW_MAX_ROWS];
 static char sw_value_buf[SW_MAX_ROWS][20];
+
+/* Graphics choices are persisted and applied on the next launch.  Renderer
+ * creation owns the window flags and GL context, so rebuilding it underneath
+ * the running compositor would leave SDL textures and the companion target
+ * tied to a dead renderer. */
+#define SW_MAX_SHADERS 32
+#define SW_SHADER_PATH_MAX 256
+static char sw_shader_names[SW_MAX_SHADERS][SW_SHADER_PATH_MAX];
+static int sw_shader_count;
+static char sw_selected_shader[SW_SHADER_PATH_MAX];
 
 /* ---- map pins ----------------------------------------------------------
  * Ported from the donor's Android companion (MinimapView.java: MAX_PINS,
@@ -562,7 +581,11 @@ static int sw_backend_slot(int picker_index) {
 static bool sw_confirm_active;
 /* The modal serves more than save states now.  ONE modal with a kind, rather
  * than a second one that could fight it for input ownership. */
-enum { kConfirm_Save = 0, kConfirm_LanguageRestart = 1 };
+enum {
+  kConfirm_Save = 0,
+  kConfirm_LanguageRestart = 1,
+  kConfirm_GraphicsRestart = 2,
+};
 static int  sw_confirm_kind;
 static int  sw_confirm_slot;           /* picker index */
 static bool sw_confirm_overwrite;      /* wording only */
@@ -737,21 +760,53 @@ static float text_width(const char *s, float sc) {
 static void draw_text(const char *s, float x, float y, float sc);
 static float text_width(const char *s, float sc);
 
+/* THE LEGIBILITY FLOOR.  u is min(W,H)/720, so on the Switch companion 2*u
+ * is already ~1.3 screen pixels per glyph pixel.  fit_scale used to shrink
+ * without limit, and below ~1 px/pixel the NEAREST sampler drops whole glyph
+ * rows: that is what made "SAVE   LOAD" on the save-state rows and the
+ * GUIDE text unreadable, and long QOL labels look chopped.  Nothing is
+ * drawn under this scale any more; a string that still does not fit is
+ * truncated with a trailing "." instead (see fit_text). */
+#define SS_TEXT_MIN_SCALE (1.5f * u)
+
 static float fit_scale(const char *s, float sc, float max_w) {
   float w = text_width(s, sc);
   if (w > max_w && w > 0.0f)
     sc *= max_w / w;
+  if (sc < SS_TEXT_MIN_SCALE && s[0])
+    sc = SS_TEXT_MIN_SCALE;
   return sc;
 }
 
+/* Copies s into out, cut so that it fits max_w at scale sc; a cut string
+ * ends in "." so the reader knows it continues.  Returns out. */
+static const char *fit_text(const char *s, float sc, float max_w, char *out, size_t cap) {
+  size_t n = strlen(s);
+  if (text_width(s, sc) <= max_w || cap < 3) return s;
+  if (n >= cap) n = cap - 1;
+  memcpy(out, s, n);
+  out[n] = 0;
+  while (n > 1 && text_width(out, sc) + 8 * sc > max_w) out[--n] = 0;
+  out[n] = '.';
+  out[n + 1] = 0;
+  return out;
+}
+
+/* y is the top of the text AT THE REQUESTED SCALE; a shrunk string is
+ * re-centred on that same vertical middle rather than hanging off the top. */
 static void draw_text_fit(const char *s, float x, float y, float sc, float max_w) {
-  draw_text(s, x, y, fit_scale(s, sc, max_w));
+  char buf[96];
+  float used = fit_scale(s, sc, max_w);
+  s = fit_text(s, used, max_w, buf, sizeof buf);
+  draw_text(s, x, y + (sc - used) * 4, used);
 }
 
 static void draw_text_right_fit(const char *s, float right, float y, float sc,
                                 float max_w) {
+  char buf[96];
   float used = fit_scale(s, sc, max_w);
-  draw_text(s, right - text_width(s, used), y, used);
+  s = fit_text(s, used, max_w, buf, sizeof buf);
+  draw_text(s, right - text_width(s, used), y + (sc - used) * 4, used);
 }
 
 static void draw_text(const char *s, float x, float y, float sc) {
@@ -771,6 +826,45 @@ static void draw_text(const char *s, float x, float y, float sc) {
     if (ch == ' ') { cx += 5 * sc; continue; }
     if (ch >= '0' && ch <= '9') draw_glyph(kDigitGlyph[ch - '0'], cx, y, sc);
     else if (ch >= 'A' && ch <= 'Z') draw_cell(tex_letters, kSS_LetterCell[ch - 'A'], 8, SS_LETTER_COLS, cx, y, sc);
+    else {
+      /* The atlas has no punctuation, and these used to be skipped while
+       * still advancing the cursor -- so "1.1.1" read "1 1 1" and every
+       * colon left a hole.  Drawn procedurally in the letter colour, on the
+       * same 8x8 grid, with the shapes Esteban's 3DS update view uses. */
+      uint32_t col = COL(248, 248, 248);
+      float px = sc;                                 /* one glyph pixel */
+      switch (ch) {
+      case '.':  fill_rect(cx + 3 * px, y + 5 * px, 2 * px, 2 * px, col); break;
+      case ',':  fill_rect(cx + 3 * px, y + 6 * px, 2 * px, 2 * px, col);
+                 fill_rect(cx + 2 * px, y + 8 * px, 1 * px, 1 * px, col); break;
+      case ':':  fill_rect(cx + 3 * px, y + 2 * px, 2 * px, 2 * px, col);
+                 fill_rect(cx + 3 * px, y + 5 * px, 2 * px, 2 * px, col); break;
+      case '-':  fill_rect(cx + 1 * px, y + 3 * px, 6 * px, 2 * px, col); break;
+      case '+':  fill_rect(cx + 1 * px, y + 3 * px, 6 * px, 2 * px, col);
+                 fill_rect(cx + 3 * px, y + 1 * px, 2 * px, 6 * px, col); break;
+      case '/':  for (int i = 0; i < 7; i++) fill_rect(cx + (6 - i) * px, y + i * px, px, px, col); break;
+      case '%':  fill_rect(cx + 1 * px, y + 1 * px, 2 * px, 2 * px, col);
+                 fill_rect(cx + 5 * px, y + 5 * px, 2 * px, 2 * px, col);
+                 for (int i = 0; i < 7; i++) { fill_rect(cx + (6 - i) * px, y + i * px, px, px, col); }
+                 break;
+      case '\'': fill_rect(cx + 3 * px, y + 0 * px, 2 * px, 3 * px, col); break;
+      case '!':  fill_rect(cx + 3 * px, y + 0 * px, 2 * px, 5 * px, col);
+                 fill_rect(cx + 3 * px, y + 6 * px, 2 * px, 2 * px, col); break;
+      case '?':  fill_rect(cx + 2 * px, y + 0 * px, 4 * px, 1 * px, col);
+                 fill_rect(cx + 5 * px, y + 1 * px, 1 * px, 2 * px, col);
+                 fill_rect(cx + 3 * px, y + 3 * px, 2 * px, 2 * px, col);
+                 fill_rect(cx + 3 * px, y + 6 * px, 2 * px, 2 * px, col); break;
+      case '(':  fill_rect(cx + 4 * px, y + 0 * px, 2 * px, 1 * px, col);
+                 fill_rect(cx + 3 * px, y + 1 * px, 1 * px, 6 * px, col);
+                 fill_rect(cx + 4 * px, y + 7 * px, 2 * px, 1 * px, col); break;
+      case ')':  fill_rect(cx + 2 * px, y + 0 * px, 2 * px, 1 * px, col);
+                 fill_rect(cx + 4 * px, y + 1 * px, 1 * px, 6 * px, col);
+                 fill_rect(cx + 2 * px, y + 7 * px, 2 * px, 1 * px, col); break;
+      case '>':  for (int i = 0; i < 4; i++) { fill_rect(cx + (1 + i) * px, y + i * px, px, px, col);
+                                              fill_rect(cx + (1 + i) * px, y + (6 - i) * px, px, px, col); } break;
+      default: break;                              /* still advances: keeps layout stable */
+      }
+    }
     cx += 8 * sc;
   }
 }
@@ -1022,6 +1116,20 @@ static void draw_overworld(RectFS r, int link_x, int link_y, int area) {
     float my = oy + (128.0f + marks[i][2] / 4096.0f * 256.0f) * scale;
     draw_x_mark(mx, my, 8 * u, 8 * u, COL_OUTLINE);
     draw_x_mark(mx, my, 8 * u, 4.5f * u, COL(224, 40, 32));
+  }
+
+  /* Magic Mirror return point.  The engine already draws this on its own
+   * world map (WorldMap_HandleSprites, slot 15); the companion map showed
+   * everything but that, so a mirror set in the dark world was invisible
+   * here.  Light world only, under Link's marker.  Upstream v3.0. */
+  int portal[2];
+  if (!dark && SS_GetMirrorPortal(portal)) {
+    float mx = ox + (128.0f + portal[0] / 4096.0f * 256.0f) * scale;
+    float my = oy + (128.0f + portal[1] / 4096.0f * 256.0f) * scale;
+    float ru = (whole_map ? 1.0f : 1.4f) * u;
+    fill_round(mx - 9*ru, my - 9*ru, 18*ru, 18*ru, 9*ru, COL_OUTLINE);
+    fill_round(mx - 7*ru, my - 7*ru, 14*ru, 14*ru, 7*ru, COL(240, 192, 255));
+    fill_round(mx - 3*ru, my - 3*ru, 6*ru, 6*ru, 3*ru, COL(80, 48, 176));
   }
 
   // Link's bobbing head
@@ -1841,6 +1949,103 @@ static void draw_developer_overlay_panel(RectFS r) {
 
 static const char *sw_onoff(bool on) { return on ? "ON" : "OFF"; }
 
+static const char *sw_renderer_label(void) {
+  switch (g_config.output_method) {
+  case kOutputMethod_SDLSoftware: return "SDL SOFTWARE";
+  case kOutputMethod_OpenGL:      return "OPENGL";
+  case kOutputMethod_OpenGL_ES:   return "OPENGL ES";
+  default:                        return "SDL";
+  }
+}
+
+static const char *sw_renderer_ini(void) {
+  switch (g_config.output_method) {
+  case kOutputMethod_SDLSoftware: return "SDL-Software";
+  case kOutputMethod_OpenGL:      return "OpenGL";
+  case kOutputMethod_OpenGL_ES:   return "OpenGL ES";
+  default:                        return "SDL";
+  }
+}
+
+static bool sw_shader_extension(const char *name) {
+  const char *dot = strrchr(name, '.');
+  return dot && (!SDL_strcasecmp(dot, ".glsl") ||
+                 !SDL_strcasecmp(dot, ".glslp"));
+}
+
+static int sw_shader_compare(const void *a, const void *b) {
+  return SDL_strcasecmp((const char *)a, (const char *)b);
+}
+
+/* Shader packs are intentionally discovered only in the Zelda3 runtime root,
+ * beside zelda3.ini.  That matches the drop-in install requested by players
+ * and avoids pretending recursively referenced pass files are presets. */
+static void sw_scan_shaders(void) {
+  DIR *dir;
+  struct dirent *ent;
+
+  sw_shader_count = 0;
+  dir = opendir(".");
+  if (!dir) return;
+  while (sw_shader_count < SW_MAX_SHADERS && (ent = readdir(dir)) != NULL) {
+    if (!sw_shader_extension(ent->d_name)) continue;
+    snprintf(sw_shader_names[sw_shader_count], SW_SHADER_PATH_MAX, "%s", ent->d_name);
+    sw_shader_count++;
+  }
+  closedir(dir);
+  qsort(sw_shader_names, (size_t)sw_shader_count,
+        sizeof(sw_shader_names[0]), sw_shader_compare);
+}
+
+static const char *sw_shader_label(void) {
+  const char *name = g_config.shader;
+  if (!name || !*name) return sw_shader_count ? "OFF" : "OFF - NONE FOUND";
+  {
+    const char *slash = strrchr(name, '/');
+    const char *backslash = strrchr(name, '\\');
+    if (!slash || (backslash && backslash > slash)) slash = backslash;
+    return slash ? slash + 1 : name;
+  }
+}
+
+static void sw_arm_graphics_restart(void) {
+  sw_confirm_active = true;
+  sw_confirm_kind = kConfirm_GraphicsRestart;
+  sw_confirm_choice = 0;              /* NO: save now, restart only if asked */
+  sw_confirm_quick = false;
+  sw_confirm_restore_tab = -1;
+  sw_confirm_close_overlay = false;
+}
+
+static void sw_cycle_shader(int dir) {
+  int at = 0;                         /* 0 is OFF; files start at 1 */
+  int choices = sw_shader_count + 1;
+  if (sw_shader_count == 0 && (!g_config.shader || !*g_config.shader))
+    return;
+  if (g_config.shader && *g_config.shader) {
+    for (int i = 0; i < sw_shader_count; i++) {
+      if (!SDL_strcasecmp(g_config.shader, sw_shader_names[i])) {
+        at = i + 1;
+        break;
+      }
+    }
+  }
+  at = (at + (dir < 0 ? choices - 1 : 1)) % choices;
+  if (at == 0) {
+    sw_selected_shader[0] = 0;
+    g_config.shader = NULL;
+    update_ini("[Graphics]", "Shader", "");
+  } else {
+    snprintf(sw_selected_shader, sizeof(sw_selected_shader), "%s",
+             sw_shader_names[at - 1]);
+    g_config.shader = sw_selected_shader;
+    update_ini("[Graphics]", "Shader", sw_selected_shader);
+  }
+  StartupLog("GRAPHICS PENDING: renderer=%s shader=%s",
+             sw_renderer_ini(), g_config.shader ? g_config.shader : "OFF");
+  sw_arm_graphics_restart();
+}
+
 static const char *switch_display_label(void) {
   switch (g_config.aleks_display_mode) {
   case 1:  return "DUAL";
@@ -2063,6 +2268,58 @@ static const char *const kQolLabel[12] = {
   "CARRY MORE RUPEES", "MISC BUG FIXES", "CANCEL BIRD TRAVEL",
 };
 
+/* ---- in-game updater rows --------------------------------------------- */
+#ifdef __SWITCH__
+/* One-word-ish status that fits a value column (<= 19 chars). */
+static const char *sw_update_status(void) {
+  static char buf[20];
+  switch (AleksUpdate_Status()) {
+  case ALEKS_UPDATE_UNAVAILABLE:       return "UNAVAILABLE";
+  case ALEKS_UPDATE_CHECKING:          return "CHECKING...";
+  case ALEKS_UPDATE_UP_TO_DATE:        return "UP TO DATE";
+  case ALEKS_UPDATE_AVAILABLE:         return "AVAILABLE";
+  case ALEKS_UPDATE_DOWNLOADING:
+    snprintf(buf, sizeof buf, "DOWNLOADING %u%%", AleksUpdate_ProgressPermille() / 10u);
+    return buf;
+  case ALEKS_UPDATE_VERIFYING:         return "VERIFYING...";
+  case ALEKS_UPDATE_READY:             return "READY TO INSTALL";
+  case ALEKS_UPDATE_INSTALLING:        return "INSTALLING...";
+  case ALEKS_UPDATE_INSTALLED_RESTART: return "INSTALLED";
+  case ALEKS_UPDATE_FAILED:            return "FAILED";
+  default:                             return "NOT CHECKED";
+  }
+}
+
+/* The single action row's label for the current state.  NULL = no action
+ * (a worker is busy, or nothing can be done). */
+static const char *sw_update_action(void) {
+  switch (AleksUpdate_Status()) {
+  case ALEKS_UPDATE_AVAILABLE:         return "DOWNLOAD UPDATE";
+  case ALEKS_UPDATE_READY:             return "INSTALL UPDATE";
+  case ALEKS_UPDATE_FAILED:            return "RETRY";
+  case ALEKS_UPDATE_UP_TO_DATE:
+  case ALEKS_UPDATE_UNKNOWN:           return "CHECK AGAIN";
+  case ALEKS_UPDATE_INSTALLED_RESTART: return "CLOSE THE GAME AND OPEN IT AGAIN";
+  case ALEKS_UPDATE_UNAVAILABLE:       return "UPDATE BY HAND (SEE README)";
+  default:                             return "WORKING...";
+  }
+}
+
+static void sw_update_activate(void) {
+  switch (AleksUpdate_Status()) {
+  case ALEKS_UPDATE_AVAILABLE:  (void)AleksUpdate_RequestDownload(); break;
+  case ALEKS_UPDATE_READY:      (void)AleksUpdate_RequestInstall();  break;
+  case ALEKS_UPDATE_FAILED:
+    /* A failed download retries the download; anything else re-checks. */
+    if (!AleksUpdate_RequestDownload()) (void)AleksUpdate_RequestCheck();
+    break;
+  case ALEKS_UPDATE_UP_TO_DATE:
+  case ALEKS_UPDATE_UNKNOWN:    (void)AleksUpdate_RequestCheck();     break;
+  default: break;
+  }
+}
+#endif
+
 /* ---- row tables ------------------------------------------------------- */
 /* Builds the current menu into sw_rows and returns the count.  This is the
  * single definition of what each row means. */
@@ -2084,6 +2341,12 @@ static int sw_build(int menu) {
     SUB("AUDIO");
     SUB("RETROACHIEVEMENTS");
     SUB("SYSTEM");
+#ifdef __SWITCH__
+    /* Appears only when there is something to act on, always last, so the
+     * fixed indices above never move.  Without this a player never learns an
+     * update exists (the language-pack lesson: no feedback = never found). */
+    if (AleksUpdate_HasNews()) ROW("UPDATE", sw_update_status());
+#endif
     break;
 
   case SW_RETRO:
@@ -2116,6 +2379,14 @@ static int sw_build(int menu) {
     ROW("SCREEN ORDER", g_config.aleks_screen_order ? "COMPANION FIRST" : "GAME FIRST");
     SUB("DUAL LAYOUT");
     SUB("FLIP LAYOUT");
+    SUB("RENDERER AND SHADER");
+    break;
+
+  case SW_GRAPHICS:
+    ROW("RENDERER", sw_renderer_label());
+    ROW("SHADER", sw_shader_label());
+    ROW("LINEAR FILTER", sw_onoff(g_config.linear_filtering));
+    ROW("APPLY", "RESTART");
     break;
 
   case SW_DUAL:
@@ -2136,6 +2407,9 @@ static int sw_build(int menu) {
     ROW("COMPANION HUD", sw_onoff(g_config.aleks_companion_hud));
     ROW("TAP TO EQUIP", sw_onoff(g_config.aleks_tap_equip));
     ROW("X ITEM RING", sw_onoff(g_config.aleks_x_item_ring));
+    ROW("STORY GUIDE", g_config.aleks_story_guide == kStoryGuideOff ? "OFF" :
+                       g_config.aleks_story_guide == kStoryGuideObjectives ? "OBJECTIVES" :
+                       g_config.aleks_story_guide == kStoryGuideHints ? "HINTS" : "DETAILED");
     SUB("QOL");
     SUB("ADVANCED");
     break;
@@ -2189,7 +2463,30 @@ static int sw_build(int menu) {
     /* Only languages with a usable pack are ever listed, so this row shows
      * ENGLISH alone until one is extracted. */
     ROW("LANGUAGE", AleksLang_DisplayAt(AleksLang_CurrentIndex()));
+#ifdef __SWITCH__
+    ROW("UPDATE", sw_update_status());
+#endif
     break;
+
+#ifdef __SWITCH__
+  case SW_UPDATE: {
+    /* Rebuilt every frame, so the status and progress are live. */
+    ROW("INSTALLED", ALEKS_NX_VERSION);
+    ROW("LATEST", AleksUpdate_LatestVersion()[0] ? AleksUpdate_LatestVersion() : "-");
+    ROW("STATUS", sw_update_status());
+    ROW(sw_update_action(), NULL);                                /* row 3 */
+    if (AleksUpdate_Status() == ALEKS_UPDATE_FAILED && AleksUpdate_Error()[0])
+      ROW(AleksUpdate_Error(), NULL);
+    else if (AleksUpdate_Status() == ALEKS_UPDATE_INSTALLING)
+      ROW("DO NOT TURN OFF THE CONSOLE", NULL);
+    else {
+      unsigned lines = AleksUpdate_ChangelogCount();
+      for (unsigned i = 0; i < lines && n < SW_MAX_ROWS; i++)
+        ROW(AleksUpdate_ChangelogLine(i), NULL);
+    }
+    break;
+  }
+#endif
 
   case SW_STATES:
     for (int i = 0; i < SW_STATE_SLOTS; i++) {
@@ -2209,6 +2506,7 @@ static int sw_build(int menu) {
 static const char *sw_menu_title(int menu) {
   switch (menu) {
   case SW_SCREEN:   return "SCREEN";
+  case SW_GRAPHICS: return "RENDERER AND SHADER";
   case SW_DUAL:     return "DUAL LAYOUT";
   case SW_FLIP:     return "FLIP LAYOUT";
   case SW_GAMEPLAY: return "GAMEPLAY";
@@ -2220,6 +2518,7 @@ static const char *sw_menu_title(int menu) {
   case SW_SYSTEM:   return "SYSTEM";
   case SW_RETRO:    return "RETROACHIEVEMENTS";
   case SW_STATES:   return "SAVE STATES";
+  case SW_UPDATE:   return "UPDATE";
   default:          return "SETTINGS";
   }
 }
@@ -2248,9 +2547,12 @@ static void sw_draw_state_row(RectFS row, int slot, bool armed) {
   }
   float tx = row.x + pad * 2 + tw;
   float ty = row.y + row.h / 2 - 8 * u;
-  draw_text_fit(sw_rows[slot].label, tx, ty, 2 * u, row.w - (tx - row.x) - 90 * u);
-  draw_text_right_fit(sw_rows[slot].value, row.x + row.w - 12 * u, ty, 1.8f * u,
-                      86 * u);
+  /* "SAVE   LOAD" is 11 glyphs; the 86*u it used to get forced it under
+   * one pixel per glyph pixel.  The label is only "SLOT n", so the value
+   * side can own 45% of the row and both stay at the menu's 2*u. */
+  float value_w = row.w * 0.45f;
+  draw_text_fit(sw_rows[slot].label, tx, ty, 2 * u, row.w - (tx - row.x) - value_w - 8 * u);
+  draw_text_right_fit(sw_rows[slot].value, row.x + row.w - 12 * u, ty, 2 * u, value_w);
 }
 
 /* ------------------------------------------------------------------ *
@@ -2260,25 +2562,60 @@ static void sw_draw_state_row(RectFS row, int slot, bool armed) {
  * from story_guide.c as STRING KEYS, so the future content pass writes rules
  * and a string table without touching this renderer.
  * ------------------------------------------------------------------ */
+static float draw_guide_wrap(const char *text, float x, float y, float sc,
+                             float max_w, int max_lines) {
+  char line[128];
+  const char *p = text;
+  float line_h = 10 * sc;
+  for (int row = 0; row < max_lines && *p; row++) {
+    size_t used = 0, last_space = 0;
+    while (p[used] && used + 1 < sizeof(line)) {
+      line[used] = p[used];
+      line[used + 1] = 0;
+      if (p[used] == ' ') last_space = used;
+      if (text_width(line, sc) > max_w) { used = last_space ? last_space : used; break; }
+      used++;
+    }
+    if (!used) break;
+    memcpy(line, p, used);
+    line[used] = 0;
+    draw_text(line, x, y, sc);
+    p += used;
+    while (*p == ' ') p++;
+    y += line_h;
+  }
+  return y;
+}
+
 static void draw_guide(RectFS r) {
   StoryGuideEntry entry;
   menu_box(r, COL_BOX_BORDER);
-  draw_text("GUIDE", r.x + r.w / 2 - text_width("GUIDE", 3 * u) / 2, r.y + 16 * u, 3 * u);
+  draw_text("STORY GUIDE", r.x + r.w / 2 - text_width("STORY GUIDE", 2.6f * u) / 2,
+            r.y + 14 * u, 2.6f * u);
 
   StoryGuide_GetCurrentEntry(&entry);
 
-  float y = r.y + 60 * u;
-  float inner = r.w - 32 * u;
-  draw_text_fit(StoryGuide_Text(entry.heading_key), r.x + 16 * u, y, 2 * u, inner);
-  y += 26 * u;
-  draw_text_fit(StoryGuide_Text(entry.objective_key), r.x + 16 * u, y, 1.8f * u, inner);
+  float x = r.x + 14 * u, y = r.y + 48 * u;
+  float inner = r.w - 28 * u;
+  fill_round(x, y, inner, 36 * u, 7 * u, COL(48, 42, 28));
+  draw_text_fit(StoryGuide_Text(entry.heading_key), x + 10 * u, y + 9 * u,
+                2.0f * u, inner - 20 * u);
+  y += 46 * u;
+  draw_text("OBJECTIVE", x + 4 * u, y, 1.5f * u);
+  y += 18 * u;
+  y = draw_guide_wrap(StoryGuide_Text(entry.objective_key), x + 4 * u, y,
+                      1.8f * u, inner - 8 * u, 3) + 8 * u;
   if (entry.hint_key) {
-    y += 30 * u;
-    draw_text_fit(StoryGuide_Text(entry.hint_key), r.x + 16 * u, y, 1.6f * u, inner);
+    draw_text("HINT", x + 4 * u, y, 1.5f * u);
+    y += 18 * u;
+    y = draw_guide_wrap(StoryGuide_Text(entry.hint_key), x + 4 * u, y,
+                        1.55f * u, inner - 8 * u, 3) + 8 * u;
   }
   if (entry.detail_key) {
-    y += 24 * u;
-    draw_text_fit(StoryGuide_Text(entry.detail_key), r.x + 16 * u, y, 1.6f * u, inner);
+    draw_text("STEP BY STEP", x + 4 * u, y, 1.5f * u);
+    y += 18 * u;
+    draw_guide_wrap(StoryGuide_Text(entry.detail_key), x + 4 * u, y,
+                    1.5f * u, inner - 8 * u, 5);
   }
 }
 
@@ -2310,6 +2647,7 @@ static void draw_confirm_modal(void) {
 
   const char *title =
       sw_confirm_kind == kConfirm_LanguageRestart ? "RESTART TO APPLY LANGUAGE?"
+      : sw_confirm_kind == kConfirm_GraphicsRestart ? "RESTART TO APPLY GRAPHICS?"
       : sw_confirm_quick ? "SAVE TO QUICK SLOT?"
       : (sw_confirm_overwrite ? "OVERWRITE SAVE STATE?" : "SAVE STATE?");
   draw_text_fit(title, box.x + box.w / 2 - text_width(title, 2.4f * u) / 2,
@@ -2322,6 +2660,11 @@ static void draw_confirm_modal(void) {
        * now instead of on the next launch. */
       snprintf(sub, sizeof(sub), "%s ON NEXT LAUNCH",
                AleksLang_DisplayAt(AleksLang_CurrentIndex()));
+    else if (sw_confirm_kind == kConfirm_GraphicsRestart)
+      snprintf(sub, sizeof(sub), "%s%s", sw_renderer_label(),
+               g_config.shader && g_config.output_method != kOutputMethod_OpenGL &&
+               g_config.output_method != kOutputMethod_OpenGL_ES ?
+               " - SHADER NEEDS OPENGL" : " ON NEXT LAUNCH");
     else
       snprintf(sub, sizeof(sub), "SLOT %d", sw_confirm_slot + 1);
     draw_text_fit(sub, box.x + box.w / 2 - text_width(sub, 2 * u) / 2,
@@ -2395,9 +2738,11 @@ static void draw_settings(RectFS r) {
       draw_text_fit(sw_rows[i].label, row.x + 12 * u, ty, 2 * u, inner - 30 * u);
       sw_draw_chevron(row);
     } else if (sw_rows[i].value) {
-      /* The value takes what it needs up to 45% of the row, the label gets
-         the rest -- both shrink to fit rather than clipping. */
-      float value_w = inner * 0.45f;
+      /* The value takes what it needs (an ON/OFF is 3 glyphs), capped at 45%;
+       * the label gets the rest, so "MIRROR TO DARK WORLD" no longer truncates
+       * next to a three-letter value. */
+      float value_w = text_width(sw_rows[i].value, 2 * u) + 4 * u;
+      if (value_w > inner * 0.45f) value_w = inner * 0.45f;
       draw_text_right_fit(sw_rows[i].value, row.x + row.w - 12 * u, ty, 2 * u, value_w);
       draw_text_fit(sw_rows[i].label, row.x + 12 * u, ty, 2 * u, inner - value_w - 8 * u);
     } else {
@@ -2432,6 +2777,7 @@ static void sw_push(int menu) {
     SS_GetGamepadControls(pad_controls);
     sw_sanitize_bindings();   /* a mangled ini heals on the way in */
   }
+  if (menu == SW_GRAPHICS) sw_scan_shaders();
   if (menu == SW_STATES) sw_state_refresh_all();
 }
 
@@ -2452,7 +2798,7 @@ static void sw_activate(int menu, int row, int dir) {
   case SW_ROOT:
     sw_push(row == 0 ? SW_GAMEPLAY : row == 1 ? SW_SCREEN :
             row == 2 ? SW_CONTROLS : row == 3 ? SW_AUDIO :
-            row == 4 ? SW_RETRO : SW_SYSTEM);
+            row == 4 ? SW_RETRO : row == 5 ? SW_SYSTEM : SW_UPDATE);
     return;
 
   case SW_RETRO:
@@ -2516,6 +2862,27 @@ static void sw_activate(int menu, int row, int dir) {
       return;
     case 5: sw_push(SW_DUAL); return;
     case 6: sw_push(SW_FLIP); return;
+    case 7: sw_push(SW_GRAPHICS); return;
+    }
+    return;
+
+  case SW_GRAPHICS:
+    if (row == 0) {
+      int method = (g_config.output_method + (dir < 0 ? 3 : 1)) & 3;
+      g_config.output_method = (uint8)method;
+      update_ini("[Graphics]", "OutputMethod", sw_renderer_ini());
+      StartupLog("GRAPHICS PENDING: renderer=%s shader=%s",
+                 sw_renderer_ini(), g_config.shader ? g_config.shader : "OFF");
+      sw_arm_graphics_restart();
+    } else if (row == 1) {
+      sw_cycle_shader(dir);
+    } else if (row == 2) {
+      g_config.linear_filtering = !g_config.linear_filtering;
+      update_ini("[Graphics]", "LinearFiltering",
+                 g_config.linear_filtering ? "true" : "false");
+      sw_arm_graphics_restart();
+    } else if (row == 3) {
+      SS_RequestRestart();
     }
     return;
 
@@ -2587,8 +2954,15 @@ static void sw_activate(int menu, int row, int dir) {
       update_ini("[General]", "AleksXItemRing", on ? "true" : "false");
       return;
     }
-    case 4: sw_push(SW_QOL); return;
-    case 5: sw_push(SW_ADVANCED); return;
+    case 4:
+      g_config.aleks_story_guide = (uint8)((g_config.aleks_story_guide + 1) % 4);
+      update_ini("[General]", "AleksStoryGuide",
+                 g_config.aleks_story_guide == kStoryGuideOff ? "Off" :
+                 g_config.aleks_story_guide == kStoryGuideObjectives ? "Objectives" :
+                 g_config.aleks_story_guide == kStoryGuideHints ? "Hints" : "Detailed");
+      return;
+    case 5: sw_push(SW_QOL); return;
+    case 6: sw_push(SW_ADVANCED); return;
     }
     return;
 
@@ -2697,7 +3071,17 @@ static void sw_activate(int menu, int row, int dir) {
       sw_confirm_restore_tab = -1;
       sw_confirm_close_overlay = false;
     }
+#ifdef __SWITCH__
+    if (row == 4) sw_push(SW_UPDATE);
+#endif
     return;
+
+#ifdef __SWITCH__
+  case SW_UPDATE:
+    /* Only the action row does anything; the rest is read-only. */
+    if (row == 3) sw_update_activate();
+    return;
+#endif
 
   case SW_STATES:
     /* Empty slot: only SAVE makes sense.  Used slot: the right half is LOAD,
@@ -2824,13 +3208,19 @@ static void draw_settings(RectFS r) {
 
 #endif  // __SWITCH__
 
+/* All tab labels share ONE scale: the largest at which the widest label
+ * still fits its button.  With five buttons on the Switch bar, "ITEMS" and
+ * "GUIDE" at the old fixed 3*u ran over their neighbours ("ITEMSSAVE"), and
+ * fitting each label on its own would have given the bar five sizes. */
+static float tab_label_scale;
+
 static void draw_tab_button(RectFS r, const char *label, bool active) {
   uint32_t bg = active ? COL(40, 34, 12) : COL_BOX;
   fill_round(r.x, r.y, r.w, r.h, 10 * u, bg);
   fill_round(r.x + 3 * u, r.y + 3 * u, r.w - 6 * u, r.h - 6 * u, 8 * u,
              active ? COL_GOLD : COL_BOX_BORDER2);
   fill_round(r.x + 7 * u, r.y + 7 * u, r.w - 14 * u, r.h - 14 * u, 6 * u, bg);
-  float s = 3 * u;
+  float s = tab_label_scale > 0 ? tab_label_scale : 3 * u;
   if (label)
     draw_text(label, r.x + r.w / 2 - text_width(label, s) / 2, r.y + r.h / 2 - 4 * s, s);
 }
@@ -2850,6 +3240,16 @@ static void draw_tab_bar(float tab_h) {
   int slots = 3;
 #endif
   float bw = (xr - x0 - (slots - 1) * tgap) / (float)slots;
+  {
+    /* Widest label decides; 14*u is the inner padding of the button. */
+    static const char *const kLabels[] = { "GEAR", "MAP", "ITEMS", "SAVE", "GUIDE" };
+    float sc = 3 * u;
+    for (int i = 0; i < slots; i++) {
+      float f = fit_scale(kLabels[i], 3 * u, bw - 14 * u);
+      if (f < sc) sc = f;
+    }
+    tab_label_scale = sc;
+  }
   tab_gear_r  = (RectFS){x0, y, bw, bh};
   tab_map_r   = (RectFS){x0 + bw + tgap, y, bw, bh};
   tab_items_r = (RectFS){x0 + 2 * (bw + tgap), y, bw, bh};
@@ -4090,7 +4490,8 @@ bool SecondScreenSDL_ConfirmCommit(void) {
   bool close_overlay;
   if (!sw_confirm_active) return false;
   if (sw_confirm_choice == 1) {
-    if (sw_confirm_kind == kConfirm_LanguageRestart) {
+    if (sw_confirm_kind == kConfirm_LanguageRestart ||
+        sw_confirm_kind == kConfirm_GraphicsRestart) {
       SS_RequestRestart();
     } else {
       SS_RequestSaveState(sw_backend_slot(sw_confirm_slot));

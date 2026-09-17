@@ -41,13 +41,6 @@ static int g_widescreen_edge_mode;
  * texture between frames (see ZeldaConsumeDisplayReconfig). */
 static bool g_display_reconfig_pending;
 
-static bool IsDungeonMapMenuActive(void) {
-  // Module 14 / submodule 3 with module 7 preserved: true throughout every
-  // dungeon-map initialisation state.
-  return main_module_index == 14 && submodule_index == 3 &&
-         saved_module_for_menu == 7;
-}
-
 static uint8 GetFixedCameraEffectiveContext(void) {
   int mod = main_module_index;
   if (mod == 14)
@@ -95,11 +88,9 @@ int ZeldaGetWidescreenFixedCameraMargin(void) {
       !g_zenv.ppu || g_zenv.ppu->extraLeftRight == 0 ||
       context == 0)
     return 0;
-  if (IsDungeonMapMenuActive())
-    return 0;
-  if (context == 7 &&
-      main_module_index == 14 && submodule_index == 7 &&
-      overworld_map_state >= 4)
+  // Map sprites are projected in map-screen coordinates, not in the gameplay
+  // camera. Applying the outdoor/dungeon camera delta hides or shifts them.
+  if (WideCamera_IsMapMenu(main_module_index, submodule_index))
     return 0;
   if (context == 7) {
     if (hdr_dungeon_dark_with_lantern && TS_copy != 0)
@@ -491,9 +482,9 @@ static void ConfigurePpuSideSpace(int visual_x, bool fixed_camera,
                                   bool horizontal_transition) {
   // Let PPU impl know about the maximum allowed extra space on the sides and bottom
   int extra_right = 0, extra_left = 0, extra_bottom = 0;
-  if (IsDungeonMapMenuActive()) {
+  if (WideCamera_IsMapMenu(main_module_index, submodule_index)) {
     // Keep the map background tiles and the sprite overlay in the same
-    // native 256-pixel space while the dungeon map is open.
+    // native 256-pixel space while any map screen is open.
     PpuSetExtraSideSpace(g_zenv.ppu, 0, 0, 0);
     return;
   }
@@ -506,25 +497,20 @@ static void ConfigurePpuSideSpace(int visual_x, bool fixed_camera,
        mod == 18 || mod == 19 || mod == 21 || mod == 22 || mod == 23))
     mod = player_is_indoors ? 7 : 9;
   if (mod == 9) {
-    if (main_module_index == 14 && submodule_index == 7 && overworld_map_state >= 4) {
-      // World map
-      extra_left = kPpuExtraLeftRight, extra_right = kPpuExtraLeftRight;
-      extra_bottom = 16;
+    // Outdoors. The world map no longer needs a branch here: it is a map
+    // screen and returned above with no extra space at all.
+    if (horizontal_transition) {
+      extra_left = extra_right = kPpuExtraLeftRight;
+    } else if (fixed_camera) {
+      int left = WideCamera_Unwrap16(ow_scroll_vars0.xstart, visual_x);
+      int right = WideCamera_Unwrap16(ow_scroll_vars0.xend, visual_x);
+      extra_left = IntMax(visual_x - left, 0);
+      extra_right = IntMax(right - visual_x, 0);
     } else {
-      // outdoors
-      if (horizontal_transition) {
-        extra_left = extra_right = kPpuExtraLeftRight;
-      } else if (fixed_camera) {
-        int left = WideCamera_Unwrap16(ow_scroll_vars0.xstart, visual_x);
-        int right = WideCamera_Unwrap16(ow_scroll_vars0.xend, visual_x);
-        extra_left = IntMax(visual_x - left, 0);
-        extra_right = IntMax(right - visual_x, 0);
-      } else {
-        extra_left = BG2HOFS_copy2 - ow_scroll_vars0.xstart;
-        extra_right = ow_scroll_vars0.xend - BG2HOFS_copy2;
-      }
-      extra_bottom = ow_scroll_vars0.yend - BG2VOFS_copy2;
+      extra_left = BG2HOFS_copy2 - ow_scroll_vars0.xstart;
+      extra_right = ow_scroll_vars0.xend - BG2HOFS_copy2;
     }
+    extra_bottom = ow_scroll_vars0.yend - BG2VOFS_copy2;
   } else if (mod == 7) {
     // indoors, except when the light cone is in use
     if (!(hdr_dungeon_dark_with_lantern && TS_copy != 0)) {

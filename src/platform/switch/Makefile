@@ -56,7 +56,11 @@ CFILES := $(wildcard $(SRC_DIR)/src/*.c $(SRC_DIR)/src/platform/switch/*.c $(SRC
 INCLUDES	:=	$(SRC_DIR) $(SRC_DIR)/src $(SRC_DIR)/third_party/opus-1.3.1-stripped $(SRC_DIR)/third_party/rcheevos/include $(SRC_DIR)/third_party/rcheevos/src
 APP_TITLE   :=  Zelda LTTP - ALEKS Ultimate
 APP_AUTHOR  :=  ALEKS - based on snesrev/zelda3
-APP_VERSION :=  1.1.1
+# Single source: src/aleks_version.h (the updater compares against it).
+# APP_VERSION_SUFFIX marks a TEST build in hbmenu without touching the header.
+ALEKS_NX_VERSION := $(shell sed -n 's/.*ALEKS_NX_VERSION "\([^"]*\)".*/\1/p' $(TOPDIR)/$(SRC_DIR)/src/aleks_version.h)
+APP_VERSION_SUFFIX ?=
+APP_VERSION :=  $(ALEKS_NX_VERSION)$(APP_VERSION_SUFFIX)
 ROMFS       :=  romfs
 
 #---------------------------------------------------------------------------------

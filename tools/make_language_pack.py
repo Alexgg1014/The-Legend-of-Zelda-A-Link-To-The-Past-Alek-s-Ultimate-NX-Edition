@@ -36,7 +36,31 @@ import struct
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ASSETS = os.path.join(os.path.dirname(_HERE), 'assets')
+
+# The language tables live in the repository's assets/ directory -- this tool is
+# a thin re-packer around them and cannot work alone.  Copying just this one
+# file out of GitHub gives "ModuleNotFoundError: No module named 'util'", which
+# says nothing useful, so look in the obvious places and explain the fix.
+_CANDIDATES = [
+    os.path.join(os.path.dirname(_HERE), 'assets'),   # tools/.. /assets
+    os.path.join(os.getcwd(), 'assets'),              # run from the repo root
+    os.path.join(_HERE, 'assets'),                    # assets/ beside the tool
+]
+_ASSETS = next((d for d in _CANDIDATES
+                if os.path.isfile(os.path.join(d, 'text_compression.py'))), None)
+if _ASSETS is None:
+    sys.exit(
+        "Could not find the language tables (assets/text_compression.py).\n"
+        "\n"
+        "This tool is part of the repository and needs the files next to it --\n"
+        "one .py on its own is not enough.\n"
+        "\n"
+        "Download the SOURCE CODE (zip) from the release page, unpack it, and\n"
+        "run the tool from inside that folder:\n"
+        "\n"
+        "    python tools/make_language_pack.py \"your-rom.sfc\"\n"
+        "\n"
+        "Looked in:\n  " + "\n  ".join(_CANDIDATES))
 sys.path.insert(0, _ASSETS)
 
 import util                 # noqa: E402
