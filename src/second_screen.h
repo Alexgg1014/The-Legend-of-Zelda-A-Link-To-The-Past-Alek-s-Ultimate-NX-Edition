@@ -82,6 +82,8 @@ void SS_Set3DSDisplayMode(int mode);
 void SS_Set3DSWideEdgeMode(int mode);
 void SS_RequestMemoryDump(const char *dump_dir);
 void SS_RequestRestart(void);
+void SS_RequestQuit(void);
+bool SS_TakeQuitRequest(void);
 unsigned SS_GetFeatures(void);
 void SS_SetFeature(unsigned mask, bool on);
 bool SS_IsWidescreen(void);

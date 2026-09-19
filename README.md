@@ -127,12 +127,26 @@ display mode. It is driven by pad or by touch.
 Open **Settings → Screen → Renderer and Shader** to choose the output backend,
 linear filtering, or a GLSL shader without editing `zelda3.ini` by hand.
 
-Put shader presets directly beside the NRO in `sdmc:/switch/Zelda3/`. The
-picker discovers `.glsl` and `.glslp` files, lists them alphabetically, and
-always includes **OFF**. Shader processing requires the **OpenGL** or
-**OpenGL ES** renderer. Graphics changes are saved immediately and applied
-after a restart; the confirmation defaults to **NO**, so merely browsing the
-menu never interrupts play.
+Shaders need the [snesrev/glsl-shaders](https://github.com/snesrev/glsl-shaders)
+layout. Download that repository and copy it to `sdmc:/switch/Zelda3/shaders/`
+(or just the folders you want, e.g. `shaders/crt/`). Presets reference their
+pass files relative to themselves, so **do not** move a `.glslp` out of its
+folder. The **Shader** row opens a list of every preset found (`crt/crt-aperture`
+and so on); a lone `.glsl` in the root or in `shaders/` is listed too.
+
+Shader processing requires the **OpenGL** or **OpenGL ES** renderer. Two
+things to know before switching:
+
+- **The OpenGL renderer has no companion screen.** It draws the game alone,
+  so the dual-screen layout, the touch pages and Settings itself are not shown.
+  The Renderer row asks for confirmation before switching there. To get back
+  without editing the ini, **hold ZL + R3 while the game boots**: the renderer
+  is forced back to SDL and saved.
+- Renderer and shader changes only take effect on the next launch. Use
+  **Save and exit to apply** on the same page; a game reset does not apply them.
+
+If a shader fails to compile, the row shows `FAILED` and the compiler output
+is in `startup.log`.
 
 ---
 
@@ -341,7 +355,7 @@ sdmc:/switch/Zelda3/
 ├── zelda3.sfc            your USA ROM  <- required, keep it here
 ├── zelda3_assets.dat     generated on first run from the ROM above
 ├── zelda3.ini            generated; all settings live here
-├── *.glsl / *.glslp      optional shader files shown in the GUI
+├── shaders/              optional: the glsl-shaders repository (or parts of it)
 ├── saves/                SRAM and save states
 ├── languages/            optional translation ROMs (es.smc, ...) and their packs
 ├── msu/                  optional MSU-1 audio
@@ -376,7 +390,8 @@ plainly what that does and does not cover.
 - Quick Items as quick *use*
 - Docked 1920×1080 output
 - Language switching round-trip
-- Renderer/shader selection and shader discovery from the Zelda3 root
+- Renderer/shader selection and preset discovery under `shaders/`
+- In-game update check against the release manifest (real hardware, v1.2.1)
 
 Anything not listed above should be treated as untested rather than assumed
 working.
@@ -388,7 +403,9 @@ working.
 - RetroAchievements Hardcore is not supported.
 - Language support depends on the translation ROM's layout, not its language.
 - Changing language requires a restart.
-- Changing the renderer, shader or linear filtering requires a restart.
+- Changing the renderer, shader or linear filtering requires closing and
+  reopening the game (Save and exit to apply). The OpenGL renderer shows no
+  companion screen; hold ZL + R3 at boot to return to SDL.
 - True 16:9 Expanded's extra vertical view depends on the current area having
   world below the normal viewport; where it does not, a black band appears.
 - The native Story Guide content is currently English-only.

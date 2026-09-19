@@ -18,6 +18,7 @@
 #include <string.h>
 #ifdef __SWITCH__
 #include <dirent.h>
+#include <sys/stat.h>
 #endif
 
 #ifdef __3DS__
@@ -106,6 +107,7 @@ void SS_SetHudHidden(bool hide);
 bool SS_IsHudHidden(void);
 void SS_RequestMemoryDump(const char *dump_dir);
 void SS_RequestRestart(void);
+void SS_RequestQuit(void);
 void SS_ArmButtonCapture(bool arm);
 int  SS_GetCapturedButton(void);
 void SS_GetGamepadControls(int *out12);
@@ -253,14 +255,18 @@ static RectFS screen_row_r[4], screen_back_r;
  * same rule the final TMC panel follows).
  * ------------------------------------------------------------------ */
 enum {
-  SW_ROOT, SW_SCREEN, SW_GRAPHICS, SW_DUAL, SW_FLIP, SW_GAMEPLAY,
+  SW_ROOT, SW_SCREEN, SW_GRAPHICS, SW_SHADER_PICK, SW_DUAL, SW_FLIP, SW_GAMEPLAY,
   SW_RETRO,
   SW_QOL, SW_ADVANCED, SW_CONTROLS, SW_SHORTCUTS,
   SW_AUDIO, SW_SYSTEM, SW_STATES,
   SW_UPDATE,
 };
 
-#define SW_MAX_ROWS 20
+#define SW_MAX_SHADERS 128
+#define SW_SHADER_PATH_MAX 160
+/* The shader picker lists up to SW_MAX_SHADERS presets on one scrolling
+ * page; every other menu stays well under the old 20. */
+#define SW_MAX_ROWS (SW_MAX_SHADERS + 1)
 #define SW_MAX_VISIBLE 6
 
 typedef struct SwRow {
@@ -282,8 +288,6 @@ static char sw_value_buf[SW_MAX_ROWS][20];
  * creation owns the window flags and GL context, so rebuilding it underneath
  * the running compositor would leave SDL textures and the companion target
  * tied to a dead renderer. */
-#define SW_MAX_SHADERS 32
-#define SW_SHADER_PATH_MAX 256
 static char sw_shader_names[SW_MAX_SHADERS][SW_SHADER_PATH_MAX];
 static int sw_shader_count;
 static char sw_selected_shader[SW_SHADER_PATH_MAX];
@@ -585,7 +589,10 @@ enum {
   kConfirm_Save = 0,
   kConfirm_LanguageRestart = 1,
   kConfirm_GraphicsRestart = 2,
+  /* Moving TO a companion-less renderer is confirmed, never cycled into. */
+  kConfirm_RendererOpenGL = 3,
 };
+static int sw_pending_method = -1;
 static int  sw_confirm_kind;
 static int  sw_confirm_slot;           /* picker index */
 static bool sw_confirm_overwrite;      /* wording only */
@@ -1560,6 +1567,11 @@ static void draw_sidebar(float x, float y, float w, float h, bool dungeon_mode) 
  * one -- `fopen("zelda3.ini","wb")` had already destroyed the old contents
  * before the first byte of the new was written.
  */
+static void update_ini(const char *section, const char *key, const char *value);
+/* main.c needs it before SDL is up (safe boot); plain stdio, no renderer. */
+void AleksIni_Update(const char *section, const char *key, const char *value) {
+  update_ini(section, key, value);
+}
 static void update_ini(const char *section, const char *key, const char *value) {
   FILE *f = fopen("zelda3.ini", "rb");
   if (!f) { StartupLog("CONFIG SAVE: failed (no zelda3.ini)"); return; }
@@ -1949,11 +1961,15 @@ static void draw_developer_overlay_panel(RectFS r) {
 
 static const char *sw_onoff(bool on) { return on ? "ON" : "OFF"; }
 
+/* The OpenGL renderer (opengl.c) presents the game straight to the window:
+ * it never goes through AleksCompositor, so there is no companion with it.
+ * Shaders only exist on that path.  Until a GL compositor exists, the row
+ * says so instead of letting the player discover it. */
 static const char *sw_renderer_label(void) {
   switch (g_config.output_method) {
   case kOutputMethod_SDLSoftware: return "SDL SOFTWARE";
-  case kOutputMethod_OpenGL:      return "OPENGL";
-  case kOutputMethod_OpenGL_ES:   return "OPENGL ES";
+  case kOutputMethod_OpenGL:      return "OPENGL - SINGLE SCREEN";
+  case kOutputMethod_OpenGL_ES:   return "OPENGL ES - SINGLE SCREEN";
   default:                        return "SDL";
   }
 }
@@ -1977,35 +1993,72 @@ static int sw_shader_compare(const void *a, const void *b) {
   return SDL_strcasecmp((const char *)a, (const char *)b);
 }
 
-/* Shader packs are intentionally discovered only in the Zelda3 runtime root,
- * beside zelda3.ini.  That matches the drop-in install requested by players
- * and avoids pretending recursively referenced pass files are presets. */
-static void sw_scan_shaders(void) {
-  DIR *dir;
+/* Shader discovery.
+ *
+ * A .glslp preset names its passes RELATIVE TO ITSELF ("shader0 =
+ * shaders/crt-aperture.glsl"), and glsl_shader.c resolves them that way.
+ * v1.2.0 only scanned the runtime root, so the only way to select a preset
+ * was to copy it there -- which broke every relative pass path and failed
+ * silently.  Now the whole snesrev/glsl-shaders tree can be dropped in as
+ * Zelda3/shaders/ and presets are found where they live; what is stored in
+ * the ini is the path relative to the runtime root, so the passes resolve.
+ *
+ * .glslp anywhere under shaders/ (3 levels) is a preset.  A bare .glsl is
+ * listed only in the root and directly in shaders/: deeper ones are the
+ * pass files of presets, and hundreds of those are not a menu. */
+static void sw_scan_dir(const char *rel, int depth) {
+  DIR *dir = opendir(rel[0] ? rel : ".");
   struct dirent *ent;
-
-  sw_shader_count = 0;
-  dir = opendir(".");
   if (!dir) return;
   while (sw_shader_count < SW_MAX_SHADERS && (ent = readdir(dir)) != NULL) {
+    char path[SW_SHADER_PATH_MAX];
+    struct stat st;
+    if (ent->d_name[0] == '.') continue;
+    snprintf(path, sizeof path, "%s%s%s", rel, rel[0] ? "/" : "", ent->d_name);
+    if (stat(path, &st) != 0) continue;
+    if (S_ISDIR(st.st_mode)) {
+      /* Only the shaders/ tree is walked, never the whole card root. */
+      if (depth < 3 && (rel[0] || !SDL_strcasecmp(ent->d_name, "shaders")))
+        sw_scan_dir(path, depth + 1);
+      continue;
+    }
     if (!sw_shader_extension(ent->d_name)) continue;
-    snprintf(sw_shader_names[sw_shader_count], SW_SHADER_PATH_MAX, "%s", ent->d_name);
+    {
+      const char *dot = strrchr(ent->d_name, '.');
+      bool preset = dot && !SDL_strcasecmp(dot, ".glslp");
+      if (!preset && depth > 1) continue;
+    }
+    snprintf(sw_shader_names[sw_shader_count], SW_SHADER_PATH_MAX, "%s", path);
     sw_shader_count++;
   }
   closedir(dir);
+}
+
+static void sw_scan_shaders(void) {
+  sw_shader_count = 0;
+  sw_scan_dir("", 0);
   qsort(sw_shader_names, (size_t)sw_shader_count,
         sizeof(sw_shader_names[0]), sw_shader_compare);
 }
 
+extern int OpenGLRenderer_ShaderState(void);   /* opengl.c: 0 none, 1 loaded, -1 failed */
+
 static const char *sw_shader_label(void) {
+  static char buf[64];
   const char *name = g_config.shader;
+  const char *base, *dot;
+  size_t n;
   if (!name || !*name) return sw_shader_count ? "OFF" : "OFF - NONE FOUND";
-  {
-    const char *slash = strrchr(name, '/');
-    const char *backslash = strrchr(name, '\\');
-    if (!slash || (backslash && backslash > slash)) slash = backslash;
-    return slash ? slash + 1 : name;
-  }
+  base = strrchr(name, '/');
+  base = base ? base + 1 : name;
+  dot = strrchr(base, '.');
+  n = dot ? (size_t)(dot - base) : strlen(base);
+  if (n > 40) n = 40;
+  /* The renderer that is RUNNING reports whether this shader compiled; the
+   * failure used to be visible only on a stderr nobody can read. */
+  snprintf(buf, sizeof buf, "%.*s%s", (int)n, base,
+           OpenGLRenderer_ShaderState() < 0 ? " - FAILED" : "");
+  return buf;
 }
 
 static void sw_arm_graphics_restart(void) {
@@ -2015,6 +2068,36 @@ static void sw_arm_graphics_restart(void) {
   sw_confirm_quick = false;
   sw_confirm_restore_tab = -1;
   sw_confirm_close_overlay = false;
+}
+
+/* "shaders/crt/crt-aperture.glslp" -> "CRT/CRT-APERTURE": the tree the
+ * player dropped in, minus the parts that are the same on every row. */
+static char sw_shader_labels[SW_MAX_SHADERS][SW_SHADER_PATH_MAX];  /* per row: sw_rows keeps pointers */
+static const char *sw_shader_display(int i) {
+  char *buf = sw_shader_labels[i];
+  const char *p = sw_shader_names[i];
+  char *dot;
+  if (!SDL_strncasecmp(p, "shaders/", 8)) p += 8;
+  snprintf(buf, SW_SHADER_PATH_MAX, "%s", p);
+  dot = strrchr(buf, '.');
+  if (dot && (!SDL_strcasecmp(dot, ".glslp") || !SDL_strcasecmp(dot, ".glsl"))) *dot = 0;
+  return buf;
+}
+
+/* index -1 = OFF.  Writes the ini and arms the apply prompt. */
+static void sw_select_shader(int index) {
+  if (index < 0 || index >= sw_shader_count) {
+    sw_selected_shader[0] = 0;
+    g_config.shader = NULL;
+    update_ini("[Graphics]", "Shader", "");
+  } else {
+    snprintf(sw_selected_shader, sizeof(sw_selected_shader), "%s", sw_shader_names[index]);
+    g_config.shader = sw_selected_shader;
+    update_ini("[Graphics]", "Shader", sw_selected_shader);
+  }
+  StartupLog("GRAPHICS PENDING: renderer=%s shader=%s",
+             sw_renderer_ini(), g_config.shader ? g_config.shader : "OFF");
+  sw_arm_graphics_restart();
 }
 
 static void sw_cycle_shader(int dir) {
@@ -2386,7 +2469,18 @@ static int sw_build(int menu) {
     ROW("RENDERER", sw_renderer_label());
     ROW("SHADER", sw_shader_label());
     ROW("LINEAR FILTER", sw_onoff(g_config.linear_filtering));
-    ROW("APPLY", "RESTART");
+    /* Renderer and shader are picked once, in main(), at boot.  There is no
+     * in-process way to apply them: the old "APPLY / RESTART" reset the game
+     * engine and changed nothing, which is why a correctly installed shader
+     * still "did nothing". */
+    ROW("SAVE AND EXIT TO APPLY", NULL);
+    break;
+
+  case SW_SHADER_PICK:
+    ROW("OFF", (!g_config.shader || !*g_config.shader) ? "*" : NULL);
+    for (int i = 0; i < sw_shader_count && n < SW_MAX_ROWS; i++)
+      ROW(sw_shader_display(i),
+          g_config.shader && !SDL_strcasecmp(g_config.shader, sw_shader_names[i]) ? "*" : NULL);
     break;
 
   case SW_DUAL:
@@ -2507,6 +2601,7 @@ static const char *sw_menu_title(int menu) {
   switch (menu) {
   case SW_SCREEN:   return "SCREEN";
   case SW_GRAPHICS: return "RENDERER AND SHADER";
+  case SW_SHADER_PICK: return "SHADER";
   case SW_DUAL:     return "DUAL LAYOUT";
   case SW_FLIP:     return "FLIP LAYOUT";
   case SW_GAMEPLAY: return "GAMEPLAY";
@@ -2566,6 +2661,11 @@ static float draw_guide_wrap(const char *text, float x, float y, float sc,
                              float max_w, int max_lines) {
   char line[128];
   const char *p = text;
+  /* Never under the legibility floor (see fit_scale): the v1.2.0 guide drew
+   * its body at 1.5-1.8*u, which on the companion is ~1 px per glyph pixel,
+   * and NEAREST sampling dropped the bottom rows of every line after the
+   * heading -- "the other lines are missing the lower part of the font". */
+  if (sc < SS_TEXT_MIN_SCALE) sc = SS_TEXT_MIN_SCALE;
   float line_h = 10 * sc;
   for (int row = 0; row < max_lines && *p; row++) {
     size_t used = 0, last_space = 0;
@@ -2600,22 +2700,25 @@ static void draw_guide(RectFS r) {
   fill_round(x, y, inner, 36 * u, 7 * u, COL(48, 42, 28));
   draw_text_fit(StoryGuide_Text(entry.heading_key), x + 10 * u, y + 9 * u,
                 2.0f * u, inner - 20 * u);
+  /* Everything at the menu's 2*u: section labels included, since 1.5*u
+   * is under the legibility floor on the companion.  The line budget is
+   * what fits the box at that size (3 + 3 + 4 lines plus labels). */
   y += 46 * u;
-  draw_text("OBJECTIVE", x + 4 * u, y, 1.5f * u);
-  y += 18 * u;
+  draw_text("OBJECTIVE", x + 4 * u, y, 2 * u);
+  y += 22 * u;
   y = draw_guide_wrap(StoryGuide_Text(entry.objective_key), x + 4 * u, y,
-                      1.8f * u, inner - 8 * u, 3) + 8 * u;
+                      2 * u, inner - 8 * u, 3) + 6 * u;
   if (entry.hint_key) {
-    draw_text("HINT", x + 4 * u, y, 1.5f * u);
-    y += 18 * u;
+    draw_text("HINT", x + 4 * u, y, 2 * u);
+    y += 22 * u;
     y = draw_guide_wrap(StoryGuide_Text(entry.hint_key), x + 4 * u, y,
-                        1.55f * u, inner - 8 * u, 3) + 8 * u;
+                        2 * u, inner - 8 * u, 3) + 6 * u;
   }
   if (entry.detail_key) {
-    draw_text("STEP BY STEP", x + 4 * u, y, 1.5f * u);
-    y += 18 * u;
+    draw_text("STEP BY STEP", x + 4 * u, y, 2 * u);
+    y += 22 * u;
     draw_guide_wrap(StoryGuide_Text(entry.detail_key), x + 4 * u, y,
-                    1.5f * u, inner - 8 * u, 5);
+                    2 * u, inner - 8 * u, 4);
   }
 }
 
@@ -2647,7 +2750,8 @@ static void draw_confirm_modal(void) {
 
   const char *title =
       sw_confirm_kind == kConfirm_LanguageRestart ? "RESTART TO APPLY LANGUAGE?"
-      : sw_confirm_kind == kConfirm_GraphicsRestart ? "RESTART TO APPLY GRAPHICS?"
+      : sw_confirm_kind == kConfirm_GraphicsRestart ? "SAVE AND EXIT TO APPLY?"
+      : sw_confirm_kind == kConfirm_RendererOpenGL ? "USE OPENGL? NO COMPANION"
       : sw_confirm_quick ? "SAVE TO QUICK SLOT?"
       : (sw_confirm_overwrite ? "OVERWRITE SAVE STATE?" : "SAVE STATE?");
   draw_text_fit(title, box.x + box.w / 2 - text_width(title, 2.4f * u) / 2,
@@ -2660,11 +2764,14 @@ static void draw_confirm_modal(void) {
        * now instead of on the next launch. */
       snprintf(sub, sizeof(sub), "%s ON NEXT LAUNCH",
                AleksLang_DisplayAt(AleksLang_CurrentIndex()));
-    else if (sw_confirm_kind == kConfirm_GraphicsRestart)
-      snprintf(sub, sizeof(sub), "%s%s", sw_renderer_label(),
-               g_config.shader && g_config.output_method != kOutputMethod_OpenGL &&
-               g_config.output_method != kOutputMethod_OpenGL_ES ?
-               " - SHADER NEEDS OPENGL" : " ON NEXT LAUNCH");
+    else if (sw_confirm_kind == kConfirm_GraphicsRestart) {
+      bool gl = g_config.output_method == kOutputMethod_OpenGL ||
+                g_config.output_method == kOutputMethod_OpenGL_ES;
+      snprintf(sub, sizeof(sub), "%s", gl ? "OPENGL: NO COMPANION SCREEN" :
+               g_config.shader ? "SHADER NEEDS OPENGL" : "APPLIES ON NEXT LAUNCH");
+    }
+    else if (sw_confirm_kind == kConfirm_RendererOpenGL)
+      snprintf(sub, sizeof(sub), "%s", "HOLD ZL+R3 WHILE BOOTING TO UNDO");
     else
       snprintf(sub, sizeof(sub), "SLOT %d", sw_confirm_slot + 1);
     draw_text_fit(sub, box.x + box.w / 2 - text_width(sub, 2 * u) / 2,
@@ -2869,21 +2976,42 @@ static void sw_activate(int menu, int row, int dir) {
   case SW_GRAPHICS:
     if (row == 0) {
       int method = (g_config.output_method + (dir < 0 ? 3 : 1)) & 3;
+      if (method == kOutputMethod_OpenGL || method == kOutputMethod_OpenGL_ES) {
+        /* v1.2.0 let a left/right press land here and the player could not
+         * find their way back (SETTINGS is drawn by the companion, and the
+         * GL path never draws it).  Ask first, and say how to undo it. */
+        sw_pending_method = method;
+        sw_confirm_active = true;
+        sw_confirm_kind = kConfirm_RendererOpenGL;
+        sw_confirm_choice = 0;
+        sw_confirm_quick = false;
+        sw_confirm_restore_tab = -1;
+        sw_confirm_close_overlay = false;
+        return;
+      }
       g_config.output_method = (uint8)method;
       update_ini("[Graphics]", "OutputMethod", sw_renderer_ini());
       StartupLog("GRAPHICS PENDING: renderer=%s shader=%s",
                  sw_renderer_ini(), g_config.shader ? g_config.shader : "OFF");
       sw_arm_graphics_restart();
     } else if (row == 1) {
-      sw_cycle_shader(dir);
+      /* Left/right still step through the list; a plain activate opens the
+       * picker, because 480 presets are not something to cycle. */
+      if (dir < 0) sw_cycle_shader(dir);
+      else sw_push(SW_SHADER_PICK);
     } else if (row == 2) {
       g_config.linear_filtering = !g_config.linear_filtering;
       update_ini("[Graphics]", "LinearFiltering",
                  g_config.linear_filtering ? "true" : "false");
       sw_arm_graphics_restart();
     } else if (row == 3) {
-      SS_RequestRestart();
+      SS_RequestQuit();
     }
+    return;
+
+  case SW_SHADER_PICK:
+    sw_select_shader(row - 1);        /* row 0 is OFF -> index -1 */
+    sw_pop();
     return;
 
   case SW_DUAL:
@@ -4490,9 +4618,18 @@ bool SecondScreenSDL_ConfirmCommit(void) {
   bool close_overlay;
   if (!sw_confirm_active) return false;
   if (sw_confirm_choice == 1) {
-    if (sw_confirm_kind == kConfirm_LanguageRestart ||
-        sw_confirm_kind == kConfirm_GraphicsRestart) {
+    if (sw_confirm_kind == kConfirm_LanguageRestart) {
       SS_RequestRestart();
+    } else if (sw_confirm_kind == kConfirm_GraphicsRestart) {
+      SS_RequestQuit();               /* the only way a renderer change lands */
+    } else if (sw_confirm_kind == kConfirm_RendererOpenGL) {
+      if (sw_pending_method >= 0) {
+        g_config.output_method = (uint8)sw_pending_method;
+        update_ini("[Graphics]", "OutputMethod", sw_renderer_ini());
+        StartupLog("GRAPHICS PENDING: renderer=%s shader=%s (confirmed)",
+                   sw_renderer_ini(), g_config.shader ? g_config.shader : "OFF");
+      }
+      sw_pending_method = -1;
     } else {
       SS_RequestSaveState(sw_backend_slot(sw_confirm_slot));
       sw_thumb_want = sw_confirm_slot;

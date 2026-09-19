@@ -10,6 +10,8 @@
 #include <switch.h>
 #include "platform/switch/switch_first_run.h"
 #include "platform/switch/aleks_update.h"
+bool SwitchSafeBoot_HeldZLR3(void);
+void AleksIni_Update(const char *section, const char *key, const char *value);
 #endif
 #ifdef _WIN32
 #include "platform/win32/volume_control.h"
@@ -764,6 +766,15 @@ int main(int argc, char** argv) {
   int window_width  = custom_size ? g_config.window_width  : g_current_window_scale * g_snes_width;
   int window_height = custom_size ? g_config.window_height : g_current_window_scale * g_snes_height;
 
+#ifdef __SWITCH__
+  if ((g_config.output_method == kOutputMethod_OpenGL ||
+       g_config.output_method == kOutputMethod_OpenGL_ES) && SwitchSafeBoot_HeldZLR3()) {
+    /* See switch_safeboot.c: the only exit from a companion-less renderer. */
+    g_config.output_method = kOutputMethod_SDL;
+    AleksIni_Update("[Graphics]", "OutputMethod", "SDL");
+    StartupLog("SAFE BOOT: ZL+R3 held, renderer forced back to SDL and saved");
+  }
+#endif
   if (g_config.output_method == kOutputMethod_OpenGL ||
       g_config.output_method == kOutputMethod_OpenGL_ES) {
     g_win_flags |= SDL_WINDOW_OPENGL;
@@ -1022,6 +1033,15 @@ int main(int argc, char** argv) {
         running = false;
         break;
       }
+    }
+
+    if (SS_TakeQuitRequest()) {
+      /* SETTINGS asked for an exit (apply renderer/shader).  Same unwind as
+       * SDL_QUIT: SRAM first, then the normal shutdown below. */
+      StartupLog("LIFECYCLE: quit requested from settings");
+      FlushSramForShutdown("settings-quit");
+      running = false;
+      break;
     }
 
     if (g_paused != audiopaused) {

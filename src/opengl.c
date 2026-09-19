@@ -16,6 +16,13 @@ static int g_draw_width, g_draw_height;
 static unsigned int g_program, g_VAO;
 static GlTextureWithSize g_texture;
 static GlslShader *g_glsl_shader;
+/* 0 no shader configured, 1 loaded, -1 configured but failed to load.  Read
+ * by the SETTINGS shader row so a broken preset is not silently "on". */
+static int g_shader_state;
+#ifdef __SWITCH__
+extern void StartupLog(const char *fmt, ...);
+#endif
+int OpenGLRenderer_ShaderState(void) { return g_shader_state; }
 static bool g_opengl_es;
 
 static void GL_APIENTRY MessageCallback(GLenum source,
@@ -169,9 +176,14 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
     printf("%s\n", infolog);
   }
 
-  if (g_config.shader)
+  if (g_config.shader) {
     g_glsl_shader = GlslShader_CreateFromFile(g_config.shader, g_opengl_es);
-  
+    g_shader_state = g_glsl_shader ? 1 : -1;
+#ifdef __SWITCH__
+    StartupLog("SHADER: '%s' -> %s", g_config.shader, g_glsl_shader ? "loaded" : "FAILED");
+#endif
+  }
+
   return true;
 }
 

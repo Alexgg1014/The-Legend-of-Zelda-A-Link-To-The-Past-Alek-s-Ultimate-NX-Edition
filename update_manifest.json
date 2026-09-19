@@ -1,15 +1,16 @@
 {
   "schema": 1,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "channel": "stable",
-  "nro_url": "https://github.com/Alexgg1014/The-Legend-of-Zelda-A-Link-To-The-Past-Alek-s-Ultimate-NX-Edition/releases/download/v1.2.0/Zelda3-ALEKS-NX-v1.2.0.nro",
-  "nro_sha256": "c1f03b59c36ed0ef84c7d0868ccce3a75f7b8e52df2633454e36964bcee140b0",
-  "nro_size": 8842534,
+  "nro_url": "https://github.com/Alexgg1014/The-Legend-of-Zelda-A-Link-To-The-Past-Alek-s-Ultimate-NX-Edition/releases/download/v1.2.1/Zelda3-ALEKS-NX.nro",
+  "nro_sha256": "8c28a63000b68d2ffb426d63ad3a56f4ac0b24d8da503e9a23fae9849d408938",
+  "nro_size": 8846630,
   "min_updater_schema": 1,
   "changelog": [
-    "Renderer and GLSL shader selection in the GUI",
-    "In-game updates from Settings > System > Update",
-    "Native offline Story Guide",
-    "Map screens fixed for widescreen and mirror return marker"
+    "Story Guide text readable again",
+    "Shaders: drop the glsl-shaders repo in shaders/, pick from a list",
+    "OpenGL asks before turning the companion off; hold ZL+R3 at boot to undo",
+    "Apply graphics = save and exit (a game reset never applied them)",
+    "Shader load errors go to startup.log and show FAILED in Settings"
   ]
 }

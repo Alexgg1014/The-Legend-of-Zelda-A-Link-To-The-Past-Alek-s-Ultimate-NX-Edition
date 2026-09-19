@@ -631,6 +631,18 @@ void SS_Set3DSWideEdgeMode(int mode) { (void)mode; }
 void SS_RequestMemoryDump(const char *dump_dir) { (void)dump_dir; }
 void SS_RequestRestart(void) { g_pending_restart = 1; }
 
+/* A clean exit to hbmenu, asked for from the companion.  The renderer and
+ * shader are chosen once in main() at boot, so "apply graphics" can only be
+ * an exit-and-relaunch; a game reset (SS_RequestRestart) leaves them as they
+ * are, which is what v1.2.0's RESTART button did. */
+static volatile int g_pending_quit;
+void SS_RequestQuit(void) { g_pending_quit = 1; }
+bool SS_TakeQuitRequest(void) {
+  if (!g_pending_quit) return false;
+  g_pending_quit = 0;
+  return true;
+}
+
 bool SS_IsWidescreen(void) { return SS_GetAspect() != kAleksAspect_4x3; }
 
 void SS_SetCrtFilter(bool on) { g_pending_crt_filter = on ? 1 : 0; }

@@ -6,6 +6,6 @@
 #ifndef ALEKS_VERSION_H_
 #define ALEKS_VERSION_H_
 
-#define ALEKS_NX_VERSION "1.2.0"
+#define ALEKS_NX_VERSION "1.2.1"
 
 #endif  /* ALEKS_VERSION_H_ */
