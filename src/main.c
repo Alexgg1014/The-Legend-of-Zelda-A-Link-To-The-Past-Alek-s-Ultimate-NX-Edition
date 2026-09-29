@@ -11,7 +11,26 @@
 #include "platform/switch/switch_first_run.h"
 #include "platform/switch/aleks_update.h"
 bool SwitchSafeBoot_HeldZLR3(void);
+void SwitchSafeBoot_DrawEscapeBanner(uint8_t *px, int pitch, int w, int h,
+                                     unsigned progress);
 void AleksIni_Update(const char *section, const char *key, const char *value);
+/*
+ * THE OPENGL ESCAPE, held not tapped.
+ *
+ * opengl.c presents straight to the window and never runs the compositor, so
+ * on that renderer the companion -- and SETTINGS with it -- is not drawn.
+ * ZL+R3 therefore cannot mean "open SETTINGS" here; it means "go back to the
+ * dual screen", which needs a relaunch because the renderer is chosen once in
+ * main().
+ *
+ * It is a HOLD for two reasons: a tap could do it by accident, and a hold
+ * gives the banner somewhere to live so the player watches it happen instead
+ * of seeing the game disappear.  Progress lives here because the input
+ * handler and the draw path both need it.
+ */
+#define GL_ESCAPE_FRAMES 72        /* ~1.2 s at 60 fps */
+static int g_gl_escape_frames;
+static bool g_gl_escape_fired;
 #endif
 #ifdef _WIN32
 #include "platform/win32/volume_control.h"
@@ -381,6 +400,30 @@ static void DrawPpuFrameWithPerf() {
   g_renderer_funcs.BeginDraw(g_snes_width * render_scale,
                              g_snes_height * render_scale,
                              &pixel_buffer, &pitch);
+#ifdef __SWITCH__
+  bool gl_renderer = g_config.output_method == kOutputMethod_OpenGL ||
+                     g_config.output_method == kOutputMethod_OpenGL_ES;
+  if (gl_renderer && !g_gl_escape_fired) {
+    const uint32 escape_combo = (1u << kGamepadBtn_L2) | (1u << kGamepadBtn_R3);
+    if ((g_gamepad_modifiers & escape_combo) == escape_combo) {
+      if (g_gl_escape_frames < GL_ESCAPE_FRAMES) g_gl_escape_frames++;
+    } else if (g_gl_escape_frames > 0) {
+      g_gl_escape_frames -= 4;      /* fades out rather than snapping away */
+      if (g_gl_escape_frames < 0) g_gl_escape_frames = 0;
+    }
+    if (g_gl_escape_frames >= GL_ESCAPE_FRAMES) {
+      /* The ini is written here, the exit is requested here, but the frame
+       * below still gets drawn WITH the finished banner on it -- that last
+       * picture is the whole point. */
+      g_gl_escape_fired = true;
+      AleksIni_Update("[Graphics]", "OutputMethod", "SDL");
+      StartupLog("GL ESCAPE: ZL+R3 held, renderer reset to SDL, exiting");
+      SS_RequestQuit();
+    }
+  } else if (!gl_renderer) {
+    g_gl_escape_frames = 0;
+  }
+#endif
   if (g_display_perf || g_config.display_perf_title) {
     static float history[64], average;
     static int history_pos;
@@ -397,6 +440,13 @@ static void DrawPpuFrameWithPerf() {
   }
   if (g_display_perf)
     RenderNumber(pixel_buffer + pitch * render_scale, pitch, g_curr_fps, render_scale == 4);
+#ifdef __SWITCH__
+  if (g_gl_escape_frames > 0)
+    SwitchSafeBoot_DrawEscapeBanner((uint8_t *)pixel_buffer, pitch,
+                                    g_snes_width * render_scale,
+                                    g_snes_height * render_scale,
+                                    (unsigned)(g_gl_escape_frames * 1000 / GL_ESCAPE_FRAMES));
+#endif
   /* The companion's save-state picker grabs its thumbnail off this frame.
    * Costs nothing unless a save asked for one (donor behaviour). */
   SecondScreen_CaptureFrameHook(pixel_buffer, pitch,
@@ -754,6 +804,21 @@ int main(int argc, char** argv) {
     g_config.audio_samples = kDefaultSamples;
 
   // set up SDL
+#ifdef __SWITCH__
+  /* Before SDL_Init: SDL brings up its own HID session, and a libnx pad
+   * opened afterwards reads nothing reliably (see switch_safeboot.c). */
+  if (g_config.output_method == kOutputMethod_OpenGL ||
+      g_config.output_method == kOutputMethod_OpenGL_ES) {
+    StartupLog("SAFE BOOT: OpenGL configured, sampling ZL+R3 for 600ms");
+    if (SwitchSafeBoot_HeldZLR3()) {
+      g_config.output_method = kOutputMethod_SDL;
+      AleksIni_Update("[Graphics]", "OutputMethod", "SDL");
+      StartupLog("SAFE BOOT: ZL+R3 held, renderer forced back to SDL and saved");
+    } else {
+      StartupLog("SAFE BOOT: not held, continuing on OpenGL (no companion)");
+    }
+  }
+#endif
   SetBootStage("[BOOT 12] SDL_Init begin");
   if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
     printf("Failed to init SDL: %s\n", SDL_GetError());
@@ -766,15 +831,6 @@ int main(int argc, char** argv) {
   int window_width  = custom_size ? g_config.window_width  : g_current_window_scale * g_snes_width;
   int window_height = custom_size ? g_config.window_height : g_current_window_scale * g_snes_height;
 
-#ifdef __SWITCH__
-  if ((g_config.output_method == kOutputMethod_OpenGL ||
-       g_config.output_method == kOutputMethod_OpenGL_ES) && SwitchSafeBoot_HeldZLR3()) {
-    /* See switch_safeboot.c: the only exit from a companion-less renderer. */
-    g_config.output_method = kOutputMethod_SDL;
-    AleksIni_Update("[Graphics]", "OutputMethod", "SDL");
-    StartupLog("SAFE BOOT: ZL+R3 held, renderer forced back to SDL and saved");
-  }
-#endif
   if (g_config.output_method == kOutputMethod_OpenGL ||
       g_config.output_method == kOutputMethod_OpenGL_ES) {
     g_win_flags |= SDL_WINDOW_OPENGL;
@@ -1548,8 +1604,16 @@ static void HandleGamepadInput(int button, bool pressed) {
   if ((g_gamepad_modifiers & settings_combo) == settings_combo) {
     if (!settings_latched) {
       settings_latched = true;
-      AleksCompositor_OpenSettings();
       ConsumeChord(kGamepadBtn_L2, kGamepadBtn_R3);
+#ifdef __SWITCH__
+      /* On OpenGL this chord is the escape, and the escape is a HOLD counted
+       * in the draw path -- so the tap does nothing here rather than opening
+       * a SETTINGS page that cannot be drawn. */
+      if (g_config.output_method == kOutputMethod_OpenGL ||
+          g_config.output_method == kOutputMethod_OpenGL_ES)
+        return;
+#endif
+      AleksCompositor_OpenSettings();
       StartupLog("ALEKS settings: opened via ZL+R3");
     }
     return;

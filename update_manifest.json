@@ -1,16 +1,14 @@
 {
   "schema": 1,
-  "version": "1.2.1",
+  "version": "1.2.2",
   "channel": "stable",
-  "nro_url": "https://github.com/Alexgg1014/The-Legend-of-Zelda-A-Link-To-The-Past-Alek-s-Ultimate-NX-Edition/releases/download/v1.2.1/Zelda3-ALEKS-NX.nro",
-  "nro_sha256": "8c28a63000b68d2ffb426d63ad3a56f4ac0b24d8da503e9a23fae9849d408938",
+  "nro_url": "https://github.com/Alexgg1014/The-Legend-of-Zelda-A-Link-To-The-Past-Alek-s-Ultimate-NX-Edition/releases/download/v1.2.2/Zelda3-ALEKS-NX.nro",
+  "nro_sha256": "bca6d8f5a86a8a14b463635660256a2d699665d744d0679916c92ef1d8522379",
   "nro_size": 8846630,
   "min_updater_schema": 1,
   "changelog": [
-    "Story Guide text readable again",
-    "Shaders: drop the glsl-shaders repo in shaders/, pick from a list",
-    "OpenGL asks before turning the companion off; hold ZL+R3 at boot to undo",
-    "Apply graphics = save and exit (a game reset never applied them)",
-    "Shader load errors go to startup.log and show FAILED in Settings"
+    "Hold ZL+R3 to leave the OpenGL renderer, with an on-screen prompt",
+    "v1.2.1's boot-time escape never worked; fixed and kept as a backup",
+    "Confirmation text no longer garbled in 4:3"
   ]
 }

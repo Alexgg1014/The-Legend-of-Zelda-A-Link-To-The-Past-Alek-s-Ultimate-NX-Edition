@@ -799,6 +799,21 @@ static const char *fit_text(const char *s, float sc, float max_w, char *out, siz
   return out;
 }
 
+/* Centre on cx using the width the string is ACTUALLY drawn at.
+ *
+ * Callers used to do `x = cx - text_width(s, sc) / 2` and then hand the same
+ * sc to draw_text_fit, which may shrink or truncate -- so the text was
+ * positioned for a string wider than the one drawn and drifted left, out of
+ * its box.  Reported on the confirmation modal: readable in widescreen (the
+ * box is wide enough that nothing shrinks) and "garbled" in 4:3, where it is
+ * not. */
+static void draw_text_center_fit(const char *s, float cx, float y, float sc, float max_w) {
+  char buf[96];
+  float used = fit_scale(s, sc, max_w);
+  s = fit_text(s, used, max_w, buf, sizeof buf);
+  draw_text(s, cx - text_width(s, used) / 2, y + (sc - used) * 4, used);
+}
+
 /* y is the top of the text AT THE REQUESTED SCALE; a shrunk string is
  * re-centred on that same vertical middle rather than hanging off the top. */
 static void draw_text_fit(const char *s, float x, float y, float sc, float max_w) {
@@ -2754,8 +2769,8 @@ static void draw_confirm_modal(void) {
       : sw_confirm_kind == kConfirm_RendererOpenGL ? "USE OPENGL? NO COMPANION"
       : sw_confirm_quick ? "SAVE TO QUICK SLOT?"
       : (sw_confirm_overwrite ? "OVERWRITE SAVE STATE?" : "SAVE STATE?");
-  draw_text_fit(title, box.x + box.w / 2 - text_width(title, 2.4f * u) / 2,
-                box.y + 26 * u, 2.4f * u, box.w - 36 * u);
+  draw_text_center_fit(title, box.x + box.w / 2, box.y + 26 * u, 2.4f * u,
+                       box.w - 36 * u);
 
   {
     char sub[48];
@@ -2771,11 +2786,11 @@ static void draw_confirm_modal(void) {
                g_config.shader ? "SHADER NEEDS OPENGL" : "APPLIES ON NEXT LAUNCH");
     }
     else if (sw_confirm_kind == kConfirm_RendererOpenGL)
-      snprintf(sub, sizeof(sub), "%s", "HOLD ZL+R3 WHILE BOOTING TO UNDO");
+      snprintf(sub, sizeof(sub), "%s", "HOLD ZL+R3 IN GAME TO COME BACK");
     else
       snprintf(sub, sizeof(sub), "SLOT %d", sw_confirm_slot + 1);
-    draw_text_fit(sub, box.x + box.w / 2 - text_width(sub, 2 * u) / 2,
-                  box.y + 60 * u, 2 * u, box.w - 36 * u);
+    draw_text_center_fit(sub, box.x + box.w / 2, box.y + 60 * u, 2 * u,
+                         box.w - 36 * u);
   }
 
   float bw = box.w * 0.34f, bh = 46 * u;
